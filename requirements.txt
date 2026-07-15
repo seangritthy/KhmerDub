@@ -1,0 +1,8 @@
+flask>=2.3.0
+openai-whisper>=20231117
+deep-translator>=1.11.4
+edge-tts>=6.1.9
+librosa>=0.10.1
+numpy>=1.24.0
+ffmpeg-python>=0.2.0
+werkzeug>=2.3.0

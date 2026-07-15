@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# App Data
+outputs/
+temp/
+uploads/
+*.mp4
+*.wav
+*.srt
+*.exe
+
+# Environments
+venv/
+env/
+ENV/
+.env
+node_modules/
+
+# Archives
+*.zip
+*.rar
+*.tar.gz
+*.7z
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
