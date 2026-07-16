@@ -260,11 +260,17 @@ def speed_change(sound: AudioSegment, speed: float) -> AudioSegment:
 # ─────────────────────────────────────────────────────────────
 #  SEGMENT TTS  — generate audio for one subtitle segment
 # ─────────────────────────────────────────────────────────────
-async def _generate_segment_tts_async(text: str, voice_id: str, out_path: str):
+async def _generate_segment_tts_async(text: str, voice_id: str, out_path: str, retries=4):
     # Natively generate at 1.5x speed (+50%) to avoid pitch distortion
-    comm = edge_tts.Communicate(text, voice_id, rate="+50%")
-    await comm.save(out_path)
-
+    for attempt in range(retries):
+        try:
+            comm = edge_tts.Communicate(text, voice_id, rate="+50%")
+            await comm.save(out_path)
+            return
+        except Exception as e:
+            if attempt == retries - 1:
+                raise e
+            await asyncio.sleep(2 ** attempt)
 
 def generate_segment_tts(text: str, voice_id: str, out_path: str, options: dict = None):
     options = options or {}
@@ -458,9 +464,9 @@ def write_srt(segments, path: str):
 # ─────────────────────────────────────────────────────────────
 def robust_translate(text: str, dest='km', retries=5) -> str:
     if not text.strip(): return text
-    translator = GoogleTranslator(source='auto', target=dest)
     for attempt in range(retries):
         try:
+            translator = GoogleTranslator(source='auto', target=dest)
             res = translator.translate(text)
             if res:
                 if "Error 500 (Server Error)" in res or "That's an error" in res:
@@ -470,11 +476,24 @@ def robust_translate(text: str, dest='km', retries=5) -> str:
             if attempt == retries - 1:
                 print(f"[Translate Error] Final attempt failed for text '{text[:20]}...': {e}")
                 return text
-            # Re-initialize in case the session got blocked
-            translator = GoogleTranslator(source='auto', target=dest)
             time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s, 8s...
     return text
 
+def robust_translate_batch(texts: list, dest='km', retries=5) -> list:
+    """Translate a list of strings in batches to avoid rate limits."""
+    if not texts: return []
+    for attempt in range(retries):
+        try:
+            translator = GoogleTranslator(source='auto', target=dest)
+            # translate_batch is much more efficient than looping
+            results = translator.translate_batch(texts)
+            return [r if r else t for r, t in zip(results, texts)]
+        except Exception as e:
+            if attempt == retries - 1:
+                print(f"[Translate Batch Error] Final attempt failed: {e}")
+                return texts
+            time.sleep(2 ** attempt)
+    return texts
 
 # ─────────────────────────────────────────────────────────────
 #  MAIN PIPELINE
@@ -533,28 +552,40 @@ def process_video(job_id: str, video_path: str, options: dict):
         upd(job_id, stage='translate', progress=48,
             message=f'🌏 Translating segments to {lang_label}…')
 
-        # Translate per segment (robustly)
         translated_segments = []
         n_segs = len(segments)
-        for i, seg in enumerate(segments):
-            if target_lang == 'English' and whisper_task == 'translate':
-                # Whisper already translated it to English perfectly!
-                t = seg['text'].strip()
-            else:
-                t = robust_translate(seg['text'].strip(), dest=dest_code) or seg['text']
-                
-            translated_segments.append({
-                'start': seg['start'],
-                'end':   seg['end'],
-                'text':  t,
-            })
-            if i % 5 == 0 or i == n_segs - 1:
-                upd(job_id, message=f'🌏 Translating segments… ({i+1}/{n_segs})')
-            # Small delay only for non-English to avoid IP block
-            if target_lang != 'English':
-                time.sleep(0.1)
+        
+        if target_lang == 'English' and whisper_task == 'translate':
+            # Whisper already translated it to English perfectly!
+            for seg in segments:
+                translated_segments.append({
+                    'start': seg['start'],
+                    'end':   seg['end'],
+                    'text':  seg['text'].strip()
+                })
+        else:
+            # Batch translate all segments at once!
+            texts_to_translate = [seg['text'].strip() for seg in segments]
+            
+            # Google Translate allows up to 5K chars, but translating 50 strings at once is perfectly safe
+            # We split into chunks of 50 just to be safe
+            translated_texts = []
+            chunk_size = 50
+            for i in range(0, len(texts_to_translate), chunk_size):
+                chunk = texts_to_translate[i:i + chunk_size]
+                upd(job_id, message=f'🌏 Translating batch {i//chunk_size + 1}…')
+                translated_texts.extend(robust_translate_batch(chunk, dest=dest_code))
+                if target_lang != 'English':
+                    time.sleep(0.5) # small delay between batches
+            
+            for seg, t_text in zip(segments, translated_texts):
+                translated_segments.append({
+                    'start': seg['start'],
+                    'end':   seg['end'],
+                    'text':  t_text or seg['text'].strip(),
+                })
 
-        # Translate full text for display by joining segments (avoids 5000 char limit)
+        # Translate full text for display by joining segments
         translated_text = " ".join([s['text'] for s in translated_segments])
 
         upd(job_id,
@@ -854,7 +885,7 @@ class KhmerDubApp(ctk.CTk):
             
         self.btn_start.configure(state="disabled", text="Processing...")
         self.progress_bar.set(0)
-        self.lbl_status.configure(text="Starting pipeline...")
+        self.lbl_status.configure(text="⚙️ Initializing AI components...")
         job_id = str(uuid.uuid4())[:8]
         options = {
             'mirror': self.chk_mirror_var.get() == "on",
