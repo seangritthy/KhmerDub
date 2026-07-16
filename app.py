@@ -173,7 +173,37 @@ async def _generate_segment_tts_async(text: str, voice_id: str, out_path: str):
     await comm.save(out_path)
 
 
-def generate_segment_tts(text: str, voice_id: str, out_path: str):
+def generate_segment_tts(text: str, voice_id: str, out_path: str, options: dict = None):
+    options = options or {}
+    engine = options.get('tts_engine', 'Edge-TTS')
+    api_key = options.get('kiritts_key', '').strip()
+    
+    if engine == 'KiriTTS' and api_key:
+        import requests
+        # Map Edge-TTS voice to standard KiriTTS voices based on gender
+        kiri_voice = 'Chanda' if ('Piseth' in voice_id or 'Christopher' in voice_id or 'Yunxi' in voice_id) else 'Maly'
+        
+        try:
+            url = 'https://api.kiritts.com/v1/speech'
+            headers = {
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json'
+            }
+            data = {
+                'text': text,
+                'voice': kiri_voice
+            }
+            res = requests.post(url, headers=headers, json=data)
+            if res.status_code == 200:
+                with open(out_path, 'wb') as f:
+                    f.write(res.content)
+                return  # Success!
+            else:
+                print(f"[KiriTTS Error] {res.status_code}: {res.text}. Falling back to Edge-TTS...")
+        except Exception as e:
+            print(f"[KiriTTS Request Failed] {e}. Falling back to Edge-TTS...")
+
+    # Default/Fallback: Edge-TTS
     asyncio.run(_generate_segment_tts_async(text, voice_id, out_path))
 
 
@@ -187,7 +217,8 @@ def build_timed_audio(
     job_id: str,
     progress_callback=None,
     voice_male: str = 'km-KH-PisethNeural',
-    voice_female: str = 'km-KH-SreymomNeural'
+    voice_female: str = 'km-KH-SreymomNeural',
+    options: dict = None
 ) -> str:
     """
     For each subtitle segment:
@@ -226,8 +257,19 @@ def build_timed_audio(
 
         seg_tts_path = os.path.join(TEMP_DIR, f'{job_id}_seg{i}.mp3')
         try:
-            generate_segment_tts(text, voice_id, seg_tts_path)
+            generate_segment_tts(text, voice_id, seg_tts_path, options=options)
             clip = AudioSegment.from_file(seg_tts_path)
+            
+            # ── Smart Emotion Punctuation ─────────────────────────
+            if options and options.get('smart_emotion'):
+                if text.endswith('!') or text.endswith('?!') or text.endswith('! '):
+                    # Angry/Excited: Louder, Faster, Higher Pitch
+                    clip = clip + 3
+                    clip = speed_change(clip, 1.15)
+                elif text.endswith('...') or text.endswith('..') or text.endswith('…'):
+                    # Sad/Hesitant: Quieter, Slower, Lower Pitch
+                    clip = clip - 2
+                    clip = speed_change(clip, 0.85)
 
             # Smart Ducking: Lower original audio by 15dB ONLY during this specific TTS clip
             clip_len = len(clip)
@@ -408,7 +450,7 @@ def process_video(job_id: str, video_path: str, options: dict):
                 message=f'🔊 {icon} {seg_gender.capitalize()} → {gender_to_label(seg_gender)} — line {done}/{total}…')
 
         timed_dub = build_timed_audio(
-            translated_segments, audio_path, video_duration, job_id, tts_progress, voice_male, voice_female
+            translated_segments, audio_path, video_duration, job_id, tts_progress, voice_male, voice_female, options=options
         )
         # Update segments with gender info for UI
         upd(job_id, segments=translated_segments, progress=83,
@@ -537,6 +579,21 @@ class KhmerDubApp(ctk.CTk):
         self.speed_var = ctk.StringVar(value="High Quality (Slow)")
         self.opt_speed = ctk.CTkOptionMenu(self.lang_frame, variable=self.speed_var, values=["High Quality (Slow)", "Fast (Less Accurate)"], font=("Segoe UI", 14))
         self.opt_speed.pack(side="left", padx=5)
+        
+        # TTS Engine dropdown and KiriTTS API Key
+        self.engine_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.engine_frame.pack(pady=5, fill="x")
+        self.lbl_engine = ctk.CTkLabel(self.engine_frame, text="Engine:", font=("Segoe UI", 14, "bold"))
+        self.lbl_engine.pack(side="left", padx=10)
+        self.engine_var = ctk.StringVar(value="Edge-TTS")
+        self.opt_engine = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["Edge-TTS", "KiriTTS"], font=("Segoe UI", 14))
+        self.opt_engine.pack(side="left", padx=5)
+        
+        self.lbl_key = ctk.CTkLabel(self.engine_frame, text="KiriTTS Key:", font=("Segoe UI", 14, "bold"))
+        self.lbl_key.pack(side="left", padx=(20, 10))
+        self.api_key_var = ctk.StringVar(value="")
+        self.ent_key = ctk.CTkEntry(self.engine_frame, textvariable=self.api_key_var, placeholder_text="sk-...", show="*", width=200, font=("Segoe UI", 14))
+        self.ent_key.pack(side="left", padx=5)
         
         self.chk_mirror_var = ctk.StringVar(value="off")
         self.chk_blur_var = ctk.StringVar(value="off")
@@ -676,8 +733,11 @@ class KhmerDubApp(ctk.CTk):
         options = {
             'mirror': self.chk_mirror_var.get() == "on",
             'blur': self.chk_blur_var.get() == "on",
+            'smart_emotion': self.chk_emotion_var.get() == "on",
             'target_lang': self.lang_var.get(),
-            'speed': self.speed_var.get()
+            'speed': self.speed_var.get(),
+            'tts_engine': self.engine_var.get(),
+            'kiritts_key': self.api_key_var.get()
         }
         threading.Thread(target=process_video, args=(job_id, self.video_path, options), daemon=True).start()
 
