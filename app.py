@@ -45,12 +45,18 @@ _whisper_model = None
 app_gui = None  # Global reference to GUI
 
 
-def get_whisper_model():
+def get_whisper_model(speed_setting="High Quality (Slow)"):
     global _whisper_model
-    if _whisper_model is None:
-        print('[KhmerDub] Loading Whisper model (small)…')
-        _whisper_model = whisper.load_model('small')
-        print('[KhmerDub] Whisper model ready.')
+    target_model_name = "small" if speed_setting == "High Quality (Slow)" else "base"
+    
+    # If a model is already loaded and it's the right one, return it
+    if _whisper_model is not None and getattr(_whisper_model, '_loaded_model_name', None) == target_model_name:
+        return _whisper_model
+        
+    print(f'[KhmerDub] Loading Whisper model ({target_model_name})…')
+    _whisper_model = whisper.load_model(target_model_name)
+    _whisper_model._loaded_model_name = target_model_name
+    print('[KhmerDub] Whisper model ready.')
     return _whisper_model
 
 
@@ -341,7 +347,7 @@ def process_video(job_id: str, video_path: str, options: dict):
         # ── 3. Transcribe / Translate ─────────────────────────
         upd(job_id, stage='transcribe', progress=30,
             message='📝 Analyzing speech with Whisper AI…')
-        model         = get_whisper_model()
+        model         = get_whisper_model(options.get('speed', 'High Quality (Slow)'))
         
         # If target is English, use Whisper's built-in Any-to-English translation task for maximum accuracy
         whisper_task  = 'translate' if target_lang == 'English' else 'transcribe'
@@ -525,6 +531,13 @@ class KhmerDubApp(ctk.CTk):
         self.opt_lang = ctk.CTkOptionMenu(self.lang_frame, variable=self.lang_var, values=["Khmer", "English", "Chinese"], font=("Segoe UI", 14))
         self.opt_lang.pack(side="left", padx=5)
         
+        # Speed dropdown
+        self.lbl_speed = ctk.CTkLabel(self.lang_frame, text="Speed:", font=("Segoe UI", 14, "bold"))
+        self.lbl_speed.pack(side="left", padx=(20, 10))
+        self.speed_var = ctk.StringVar(value="High Quality (Slow)")
+        self.opt_speed = ctk.CTkOptionMenu(self.lang_frame, variable=self.speed_var, values=["High Quality (Slow)", "Fast (Less Accurate)"], font=("Segoe UI", 14))
+        self.opt_speed.pack(side="left", padx=5)
+        
         self.chk_mirror_var = ctk.StringVar(value="off")
         self.chk_blur_var = ctk.StringVar(value="off")
         
@@ -659,13 +672,13 @@ class KhmerDubApp(ctk.CTk):
         self.btn_start.configure(state="disabled", text="Processing...")
         self.progress_bar.set(0)
         self.lbl_status.configure(text="Starting pipeline...")
-        
+        job_id = str(uuid.uuid4())[:8]
         options = {
             'mirror': self.chk_mirror_var.get() == "on",
-            'blur': self.chk_blur_var.get() == "on"
+            'blur': self.chk_blur_var.get() == "on",
+            'target_lang': self.lang_var.get(),
+            'speed': self.speed_var.get()
         }
-        
-        job_id = str(uuid.uuid4())
         threading.Thread(target=process_video, args=(job_id, self.video_path, options), daemon=True).start()
 
 # ── Standalone run ────────────────────────────────────────────
