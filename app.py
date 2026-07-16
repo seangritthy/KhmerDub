@@ -55,11 +55,35 @@ def get_whisper_model():
 
 
 # ─────────────────────────────────────────────────────────────
+#  LANGUAGE CONFIGURATION
+# ─────────────────────────────────────────────────────────────
+LANGUAGE_CONFIG = {
+    'Khmer': {
+        'trans_code': 'km',
+        'voice_male': 'km-KH-PisethNeural',
+        'voice_female': 'km-KH-SreymomNeural',
+        'label': 'Khmer (ខ្មែរ)',
+        'font': 'Battambang'
+    },
+    'English': {
+        'trans_code': 'en',
+        'voice_male': 'en-US-ChristopherNeural',
+        'voice_female': 'en-US-JennyNeural',
+        'label': 'English',
+        'font': 'Arial'
+    },
+    'Chinese': {
+        'trans_code': 'zh-CN',
+        'voice_male': 'zh-CN-YunxiNeural',
+        'voice_female': 'zh-CN-XiaoxiaoNeural',
+        'label': 'Chinese (中文)',
+        'font': 'Microsoft YaHei'
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
 #  GENDER DETECTION  (librosa pitch analysis)
 # ─────────────────────────────────────────────────────────────
-VOICE_MALE   = 'km-KH-PisethNeural'
-VOICE_FEMALE = 'km-KH-SreymomNeural'
-
 def _analyse_pitch(y, sr) -> str:
     """
     Male: median F0 < 160 Hz  |  Female: median F0 >= 160 Hz
@@ -102,11 +126,8 @@ def detect_segment_gender(audio_path: str, start_sec: float, end_sec: float) -> 
         print(f'[gender/seg {start_sec:.1f}s] {exc}')
         return 'female'
 
-def gender_to_voice(gender: str) -> str:
-    return VOICE_MALE if gender == 'male' else VOICE_FEMALE
-
 def gender_to_label(gender: str) -> str:
-    return '🎙️ Piseth (Male)' if gender == 'male' else '🎙️ Sreymom (Female)'
+    return '🎙️ Male' if gender == 'male' else '🎙️ Female'
 
 
 # ─────────────────────────────────────────────────────────────
@@ -158,12 +179,14 @@ def build_timed_audio(
     audio_path: str,          # original extracted audio for gender analysis
     video_duration: float,
     job_id: str,
-    progress_callback=None
+    progress_callback=None,
+    voice_male: str = 'km-KH-PisethNeural',
+    voice_female: str = 'km-KH-SreymomNeural'
 ) -> str:
     """
     For each subtitle segment:
       1. Detect gender from that time slice of audio
-      2. Choose Piseth (male) or Sreymom (female)
+      2. Choose male or female voice for target language
       3. Generate TTS audio with correct voice
       4. Overlay at exact start timestamp (NO speed adjustments)
     Returns path to final mixed WAV.
@@ -192,7 +215,7 @@ def build_timed_audio(
 
         # ── Per-segment gender detection ──────────────────────
         gender   = detect_segment_gender(audio_path, start_sec, end_sec)
-        voice_id = gender_to_voice(gender)
+        voice_id = voice_male if gender == 'male' else voice_female
         seg['gender'] = gender      # store for UI display
 
         seg_tts_path = os.path.join(TEMP_DIR, f'{job_id}_seg{i}.mp3')
@@ -286,6 +309,14 @@ def robust_translate(text: str, dest='km', retries=5) -> str:
 def process_video(job_id: str, video_path: str, options: dict):
     audio_path   = os.path.join(TEMP_DIR, f'{job_id}_audio.wav')
     timed_dub    = None
+    
+    target_lang = options.get('target_lang', 'Khmer')
+    lang_cfg = LANGUAGE_CONFIG.get(target_lang, LANGUAGE_CONFIG['Khmer'])
+    dest_code = lang_cfg['trans_code']
+    voice_male = lang_cfg['voice_male']
+    voice_female = lang_cfg['voice_female']
+    font_name = lang_cfg['font']
+    lang_label = lang_cfg['label']
 
     try:
         # ── 1. Extract audio ──────────────────────────────────
@@ -321,15 +352,15 @@ def process_video(job_id: str, video_path: str, options: dict):
             message=f'✅ Transcribed ({detected_lang.upper()}) — {len(segments)} segments')
         time.sleep(0.3)
 
-        # ── 4. Translate to Khmer ─────────────────────────────
+        # ── 4. Translate to Target Language ───────────────────
         upd(job_id, stage='translate', progress=48,
-            message='🌏 Translating segments to Khmer (ខ្មែរ)…')
+            message=f'🌏 Translating segments to {lang_label}…')
 
         # Translate per segment (robustly)
         translated_segments = []
         n_segs = len(segments)
         for i, seg in enumerate(segments):
-            t = robust_translate(seg['text'].strip()) or seg['text']
+            t = robust_translate(seg['text'].strip(), dest=dest_code) or seg['text']
             translated_segments.append({
                 'start': seg['start'],
                 'end':   seg['end'],
@@ -346,10 +377,10 @@ def process_video(job_id: str, video_path: str, options: dict):
         upd(job_id,
             translated_text=translated_text,
             segments=translated_segments,
-            message=f'✅ {len(translated_segments)} segments translated to Khmer')
+            message=f'✅ {len(translated_segments)} segments translated to {lang_label}')
         time.sleep(0.3)
 
-        # ── 5. Timed Khmer TTS — per-segment gender detection ─
+        # ── 5. Timed TTS — per-segment gender detection ───────
         upd(job_id, stage='tts', progress=60,
             message=f'🔊 Generating timed dubbing — detecting gender per line (natural speed)…')
 
@@ -362,11 +393,11 @@ def process_video(job_id: str, video_path: str, options: dict):
                 message=f'🔊 {icon} {seg_gender.capitalize()} → {gender_to_label(seg_gender)} — line {done}/{total}…')
 
         timed_dub = build_timed_audio(
-            translated_segments, audio_path, video_duration, job_id, tts_progress
+            translated_segments, audio_path, video_duration, job_id, tts_progress, voice_male, voice_female
         )
         # Update segments with gender info for UI
         upd(job_id, segments=translated_segments, progress=83,
-            message='✅ Timed Khmer audio track ready')
+            message=f'✅ Timed {lang_label} audio track ready')
         time.sleep(0.3)
 
         # ── 5.5 Write SRT (needed for burning) ─────────────────
@@ -395,7 +426,7 @@ def process_video(job_id: str, video_path: str, options: dict):
         fonts_dir_ffmpeg = fonts_dir.replace('\\', '/').replace(':', '\\:')
 
         # Commas inside force_style MUST be escaped with backslash, otherwise FFmpeg parses them as new filters
-        style = "Fontname=Battambang,FontSize=10,PrimaryColour=&H00FFFF,Outline=1,Shadow=1"
+        style = f"Fontname={font_name},FontSize=10,PrimaryColour=&H00FFFF,Outline=1,Shadow=1"
         style_escaped = style.replace(",", "\\,")
         vf_filters.append(f"subtitles='{srt_path_ffmpeg}':fontsdir='{fonts_dir_ffmpeg}':force_style='{style_escaped}'")
 
@@ -475,6 +506,15 @@ class KhmerDubApp(ctk.CTk):
         
         self.btn_download = ctk.CTkButton(self.url_frame, text="Download Video", command=self.start_download, font=("Segoe UI", 14), width=140, fg_color="#17a2b8", hover_color="#138496")
         self.btn_download.pack(side="left", padx=5)
+        
+        # Target language dropdown
+        self.lang_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.lang_frame.pack(pady=5, fill="x")
+        self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="Target Language:", font=("Segoe UI", 14))
+        self.lbl_lang.pack(side="left", padx=10)
+        self.lang_var = ctk.StringVar(value="Khmer")
+        self.opt_lang = ctk.CTkOptionMenu(self.lang_frame, variable=self.lang_var, values=["Khmer", "English", "Chinese"], font=("Segoe UI", 14))
+        self.opt_lang.pack(side="left", padx=5)
         
         self.chk_mirror_var = ctk.StringVar(value="off")
         self.chk_blur_var = ctk.StringVar(value="off")
