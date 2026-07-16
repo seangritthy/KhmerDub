@@ -530,6 +530,8 @@ def process_video(job_id: str, video_path: str, options: dict):
 class KhmerDubApp(ctk.CTk):
     def __init__(self):
         super().__init__()
+        global app_gui
+        app_gui = self  # Set immediately so pipeline can update UI
         self.title("KhmerDub - AI Video Translator")
         self.geometry("700x650")
         ctk.set_appearance_mode("dark")
@@ -739,9 +741,23 @@ class KhmerDubApp(ctk.CTk):
             'tts_engine': self.engine_var.get(),
             'kiritts_key': self.api_key_var.get()
         }
-        threading.Thread(target=process_video, args=(job_id, self.video_path, options), daemon=True).start()
+        
+        def run_with_error_catch():
+            try:
+                process_video(job_id, self.video_path, options)
+            except Exception as e:
+                import traceback
+                err = traceback.format_exc()
+                print(err)
+                self.after(0, lambda: [
+                    self.btn_start.configure(state="normal", text="Start Dubbing"),
+                    self.lbl_status.configure(text=f"❌ Error: {e}"),
+                    messagebox.showerror("Pipeline Error", f"{e}\n\n{err[-500:]}")
+                ])
+        
+        threading.Thread(target=run_with_error_catch, daemon=True).start()
 
 # ── Standalone run ────────────────────────────────────────────
 if __name__ == '__main__':
-    app_gui = KhmerDubApp()
-    app_gui.mainloop()
+    app = KhmerDubApp()
+    app.mainloop()
