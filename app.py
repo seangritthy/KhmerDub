@@ -167,7 +167,7 @@ def detect_segment_gender(audio_path: str, start_sec: float, end_sec: float, vid
                 img = Image.fromarray(frame_rgb)
                 
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-1.5-flash')
+                model = genai.GenerativeModel('gemini-2.5-flash')
                 response = model.generate_content([
                     "Identify the gender of the primary person speaking or the most prominent character in this image. Reply with exactly one word: 'male' or 'female'. If you cannot tell, reply 'unknown'.",
                     img
@@ -209,7 +209,7 @@ def gender_to_label(gender: str) -> str:
 KIRI_MALE_VOICES   = ['Chanda', 'Bora', 'Arun', 'Oudom', 'Rithy', 'Setha']
 KIRI_FEMALE_VOICES = ['Maly', 'Neary', 'Phanin', 'Theary']
 
-def cluster_speakers(audio_path: str, segments: list, genders: list) -> list:
+def cluster_speakers(audio_path: str, segments: list, genders: list, voice_male: str = 'Rithy', voice_female: str = 'Maly') -> list:
     """
     Fingerprint each segment with MFCC features, then cluster
     into N unique speakers. Returns a list of KiriTTS voice IDs,
@@ -242,7 +242,7 @@ def cluster_speakers(audio_path: str, segments: list, genders: list) -> list:
 
         if len(valid_idx) < 2:
             # Not enough data — fall back to simple gender mapping
-            return _fallback_voices(genders)
+            return _fallback_voices(genders, voice_male, voice_female)
 
         X = np.array([features[i] for i in valid_idx])
         X = StandardScaler().fit_transform(X)
@@ -263,17 +263,17 @@ def cluster_speakers(audio_path: str, segments: list, genders: list) -> list:
         cluster_voice_map = {}
         for cluster, counts in cluster_genders.items():
             majority_gender = 'male' if counts['male'] >= counts['female'] else 'female'
-            cluster_voice_map[cluster] = 'Rithy' if majority_gender == 'male' else 'Maly'
+            cluster_voice_map[cluster] = voice_male if majority_gender == 'male' else voice_female
 
         # Build final voice list aligned to all segments
         voices = []
         for i, seg in enumerate(segments):
             if i in valid_idx:
                 pos = valid_idx.index(i)
-                fallback_voice = 'Rithy' if (genders[i] or 'male') == 'male' else 'Maly'
+                fallback_voice = voice_male if (genders[i] or 'male') == 'male' else voice_female
                 voices.append(cluster_voice_map.get(labels[pos], fallback_voice))
             else:
-                fallback_voice = 'Rithy' if (genders[i] or 'male') == 'male' else 'Maly'
+                fallback_voice = voice_male if (genders[i] or 'male') == 'male' else voice_female
                 voices.append(fallback_voice)
 
         print(f"[Speaker Cluster] Detected {n_clusters} unique characters → voices: {cluster_voice_map}")
@@ -281,13 +281,15 @@ def cluster_speakers(audio_path: str, segments: list, genders: list) -> list:
 
     except Exception as e:
         print(f"[Speaker Cluster Error] {e} — using fallback")
-        return _fallback_voices(genders)
+        return _fallback_voices(genders, voice_male, voice_female)
 
 
-def _fallback_voices(genders: list) -> list:
-    """Simple fallback: Rithy for male, Maly for female."""
-    return ['Rithy' if (g or 'male') == 'male' else 'Maly' for g in genders]
-
+def _fallback_voices(genders: list, voice_male: str = 'Rithy', voice_female: str = 'Maly') -> list:
+    """Fallback if clustering fails: directly map male/female."""
+    voices = []
+    for g in genders:
+        voices.append(voice_male if (g or 'male') == 'male' else voice_female)
+    return voices
 
 
 # ─────────────────────────────────────────────────────────────
@@ -415,7 +417,8 @@ def build_timed_audio(
     original_audio_path: str = None,
     genders: list = None,
     kiri_voices: list = None,
-    video_path: str = None
+    video_path: str = None,
+    sequential_mode: bool = False
 ) -> str:
     """
     Fast parallel version:
@@ -454,11 +457,11 @@ def build_timed_audio(
         seg['gender'] = genders[i] or 'unknown'
 
     # ── Step 1.5: Speaker clustering (KiriTTS only) ───────────
-    # We cluster the characters and map each character's majority gender to Chanda/Neary
+    # We cluster the characters and map each character's majority gender to voice_male/voice_female
     if kiri_voices is None:
         if options and options.get('tts_engine') == 'KiriTTS' and options.get('kiritts_key', '').strip():
             print('[Speaker Cluster] Running speaker clustering for KiriTTS to track characters...')
-            kiri_voices = cluster_speakers(original_audio_path or audio_path, segments, genders)
+            kiri_voices = cluster_speakers(original_audio_path or audio_path, segments, genders, voice_male, voice_female)
 
     # ── Step 2: Generate ALL TTS clips in parallel ────────────
     tts_paths = [None] * n
@@ -511,9 +514,17 @@ def build_timed_audio(
                     clip = clip - 2
                     clip = speed_change(clip, 0.85)
 
-            start_ms = int(seg['start'] * 1000)
             clip_len  = len(clip)
-            end_ms    = start_ms + clip_len
+            if sequential_mode:
+                if i == 0:
+                    curr_time = 0
+                start_ms = curr_time
+            else:
+                start_ms = int(seg['start'] * 1000)
+                
+            end_ms = start_ms + clip_len
+            if sequential_mode:
+                curr_time = end_ms + 800  # 800ms pause between sentences
             
             # Duck the background
             ducked = bg_layer[start_ms:end_ms] - 15
@@ -634,7 +645,7 @@ Keep the exact same number of lines as the original script. Do not add any extra
 """
     for attempt in range(retries):
         try:
-            model = genai.GenerativeModel('gemini-pro-latest')
+            model = genai.GenerativeModel('gemini-2.5-pro')
             
             # Pass video file if available
             contents = [video_file, prompt] if video_file else [prompt]
@@ -821,6 +832,8 @@ def process_video(job_id: str, video_path: str, options: dict):
                 
             translated_text = " ".join([s['text'] for s in translated_segments])
             original_audio_path = video_path # For dubbing background
+            if options.get('story_mode'):
+                raise Exception("Storytelling mode requires Local Whisper to extract transcripts. Please change Transcriber to 'Whisper (Local)'.")
             
         else:
             # ── LOCAL WHISPER PIPELINE ──
@@ -915,7 +928,52 @@ def process_video(job_id: str, video_path: str, options: dict):
 
             translated_segments = []
             
-            if target_lang == 'English' and whisper_task == 'translate':
+            if options.get('story_mode'):
+                upd(job_id, stage='translate', progress=48, message=f'📖 Writing AI Story in {lang_label}…')
+                
+                if not gemini_key:
+                    raise Exception("Storytelling Mode requires a Gemini API Key. Please enter your API key in the 'Gemini/DeepSeek Key' text box.")
+                    
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=gemini_key)
+                    
+                    transcript = "\n".join([f"[{s['start']:.1f}s - {s['end']:.1f}s]: {s['text']}" for s in segments])
+                    prompt = (f"You are an expert movie narrator. Watch this video and read the following dialogue transcript. "
+                              f"Write a continuous, engaging storytelling narrative that describes the visual actions and summarizes the conversations. "
+                              f"Do not use timestamps or speaker tags. Write the entire story exclusively in {lang_label}. "
+                              f"Make it flow naturally as a single story.\n\nTranscript:\n{transcript}")
+                    
+                    try:
+                        model = genai.GenerativeModel('gemini-2.5-pro')
+                        if video_file:
+                            response = model.generate_content([prompt, video_file])
+                        else:
+                            response = model.generate_content(prompt)
+                    except Exception as e:
+                        if '429' in str(e) or 'quota' in str(e).lower():
+                            print(f"[Gemini] Pro quota exceeded, falling back to Flash: {e}")
+                            upd(job_id, message='⚠️ Pro quota exceeded. Falling back to Gemini Flash...')
+                            model = genai.GenerativeModel('gemini-2.5-flash')
+                            if video_file:
+                                response = model.generate_content([prompt, video_file])
+                            else:
+                                response = model.generate_content(prompt)
+                        else:
+                            raise e
+                            
+                    story_text = response.text.strip()
+                    import re
+                    # Split into sentences for TTS
+                    story_sentences = [s.strip() for s in re.split(r'(?<=[.!?។])\s+', story_text) if s.strip()]
+                    for s in story_sentences:
+                        translated_segments.append({'start': 0, 'end': 0, 'text': s})
+                        genders = ['male'] * len(translated_segments) # Just use the male voice (single narrator)
+                        
+                except Exception as e:
+                    print(f"Story generation failed: {e}")
+                    raise Exception(f"Story generation failed: {str(e)}")
+            elif target_lang == 'English' and whisper_task == 'translate':
                 for seg in segments:
                     translated_segments.append({
                         'start': seg['start'],
@@ -971,8 +1029,16 @@ def process_video(job_id: str, video_path: str, options: dict):
 
         video_duration = AudioSegment.from_file(original_audio_path).duration_seconds
         
+        is_story = options.get('story_mode', False)
         timed_dub = build_timed_audio(
-            translated_segments, audio_path, video_duration, job_id, tts_progress, voice_male, voice_female, options=options, original_audio_path=original_audio_path, video_path=video_path
+            translated_segments, audio_path, video_duration, job_id, tts_progress, 
+            voice_male=options.get('voice_male') or voice_male, 
+            voice_female=options.get('voice_female') or voice_female, 
+            options=options, 
+            original_audio_path=original_audio_path, 
+            video_path=video_path,
+            genders=['male'] * len(translated_segments) if is_story else None,
+            sequential_mode=is_story
         )
         
         upd(job_id, segments=translated_segments, progress=83,
@@ -1077,7 +1143,7 @@ class KhmerDubApp(ctk.CTk):
         self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="Dub Into:", font=("Segoe UI", 14, "bold"))
         self.lbl_lang.pack(side="left", padx=10)
         self.lang_var = ctk.StringVar(value="Khmer")
-        self.opt_lang = ctk.CTkOptionMenu(self.lang_frame, variable=self.lang_var, values=["Khmer", "English", "Chinese"], font=("Segoe UI", 14))
+        self.opt_lang = ctk.CTkOptionMenu(self.lang_frame, variable=self.lang_var, values=["Khmer", "English", "Chinese"], font=("Segoe UI", 14), command=self.update_voice_defaults)
         self.opt_lang.pack(side="left", padx=5)
         
         self.lbl_speed = ctk.CTkLabel(self.lang_frame, text="Transcription:", font=("Segoe UI", 14, "bold"))
@@ -1105,7 +1171,7 @@ class KhmerDubApp(ctk.CTk):
         self.lbl_engine = ctk.CTkLabel(self.engine_frame, text="Engine:", font=("Segoe UI", 14, "bold"))
         self.lbl_engine.pack(side="left", padx=10)
         self.engine_var = ctk.StringVar(value="Edge-TTS")
-        self.opt_engine = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["Edge-TTS", "KiriTTS"], font=("Segoe UI", 14))
+        self.opt_engine = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["Edge-TTS", "KiriTTS"], font=("Segoe UI", 14), command=self.update_voice_defaults)
         self.opt_engine.pack(side="left", padx=5)
         
         self.lbl_transcriber = ctk.CTkLabel(self.engine_frame, text="Transcriber:", font=("Segoe UI", 14, "bold"))
@@ -1126,10 +1192,29 @@ class KhmerDubApp(ctk.CTk):
         self.ent_key = ctk.CTkEntry(self.engine_frame, textvariable=self.api_key_var, placeholder_text="sk-...", show="*", width=200, font=("Segoe UI", 14))
         self.ent_key.pack(side="left", padx=5)
         
+        self.voice_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.voice_frame.pack(pady=5, fill="x")
+        
+        self.lbl_male = ctk.CTkLabel(self.voice_frame, text="Male Model:", font=("Segoe UI", 14, "bold"))
+        self.lbl_male.pack(side="left", padx=10)
+        self.voice_male_var = ctk.StringVar(value="km-KH-PisethNeural")
+        self.ent_male = ctk.CTkEntry(self.voice_frame, textvariable=self.voice_male_var, width=160, font=("Segoe UI", 14))
+        self.ent_male.pack(side="left", padx=5)
+        
+        self.lbl_female = ctk.CTkLabel(self.voice_frame, text="Female Model:", font=("Segoe UI", 14, "bold"))
+        self.lbl_female.pack(side="left", padx=(15, 5))
+        self.voice_female_var = ctk.StringVar(value="km-KH-SreymomNeural")
+        self.ent_female = ctk.CTkEntry(self.voice_frame, textvariable=self.voice_female_var, width=160, font=("Segoe UI", 14))
+        self.ent_female.pack(side="left", padx=5)
+        
         self.chk_mirror_var = ctk.StringVar(value="off")
         self.chk_blur_var = ctk.StringVar(value="off")
         self.chk_emotion_var = ctk.StringVar(value="on")
         self.chk_vocals_var = ctk.StringVar(value="off")
+        self.chk_story_var = ctk.StringVar(value="off")
+        
+        self.chk_story = ctk.CTkCheckBox(self.main_frame, text="Enable Storytelling Mode (Narrates entire video with 1 voice)", variable=self.chk_story_var, onvalue="on", offvalue="off", fg_color="#ffc107", hover_color="#e0a800")
+        self.chk_story.pack(pady=10)
         
         self.chk_vocals = ctk.CTkCheckBox(self.main_frame, text="Remove Original Vocals (Keep BGM/SFX)", variable=self.chk_vocals_var, onvalue="on", offvalue="off")
         self.chk_vocals.pack(pady=10)
@@ -1248,6 +1333,23 @@ class KhmerDubApp(ctk.CTk):
         elif kw.get('status') == 'error':
             self.btn_start.configure(state="normal", text="Start Dubbing")
             messagebox.showerror("Error", kw.get('message'))
+
+    def update_voice_defaults(self, choice=None):
+        engine = self.engine_var.get()
+        lang = self.lang_var.get()
+        if engine == "KiriTTS":
+            self.voice_male_var.set("Rithy")
+            self.voice_female_var.set("Maly")
+        else:
+            if lang == "Khmer":
+                self.voice_male_var.set("km-KH-PisethNeural")
+                self.voice_female_var.set("km-KH-SreymomNeural")
+            elif lang == "English":
+                self.voice_male_var.set("en-US-GuyNeural")
+                self.voice_female_var.set("en-US-AriaNeural")
+            elif lang == "Chinese":
+                self.voice_male_var.set("zh-CN-YunxiNeural")
+                self.voice_female_var.set("zh-CN-XiaoxiaoNeural")
             
     def start_dubbing(self):
         if not self.video_path:
@@ -1270,7 +1372,10 @@ class KhmerDubApp(ctk.CTk):
             'voice_speed': self.voice_speed_var.get(),
             'tts_engine': self.engine_var.get(),
             'kiritts_key': self.api_key_var.get(),
-            'gemini_key': self.gemini_key_var.get()
+            'gemini_key': self.gemini_key_var.get(),
+            'voice_male': self.voice_male_var.get(),
+            'voice_female': self.voice_female_var.get(),
+            'story_mode': self.chk_story_var.get() == "on"
         }
         
         def run_with_error_catch():
