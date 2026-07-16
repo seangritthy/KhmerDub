@@ -138,6 +138,98 @@ def gender_to_label(gender: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
+#  SPEAKER CLUSTERING — assign unique voice per character
+# ─────────────────────────────────────────────────────────────
+# Available KiriTTS voices per gender
+KIRI_MALE_VOICES   = ['Chanda', 'Bora', 'Arun', 'Oudom', 'Rithy', 'Setha']
+KIRI_FEMALE_VOICES = ['Maly', 'Neary', 'Phanin', 'Theary']
+
+def cluster_speakers(audio_path: str, segments: list, genders: list) -> list:
+    """
+    Fingerprint each segment with MFCC features, then cluster
+    into N unique speakers. Returns a list of KiriTTS voice IDs,
+    one per segment. Each unique speaker always gets the same voice.
+    """
+    try:
+        from sklearn.cluster import AgglomerativeClustering
+        from sklearn.preprocessing import StandardScaler
+
+        features = []
+        valid_idx = []
+
+        for i, seg in enumerate(segments):
+            text = seg['text'].strip()
+            if not text:
+                features.append(None)
+                continue
+            try:
+                y, sr = librosa.load(
+                    audio_path, sr=22050, mono=True,
+                    offset=seg['start'],
+                    duration=max(seg['end'] - seg['start'], 0.3)
+                )
+                mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+                feat = np.concatenate([mfcc.mean(axis=1), mfcc.std(axis=1)])
+                features.append(feat)
+                valid_idx.append(i)
+            except Exception:
+                features.append(None)
+
+        if len(valid_idx) < 2:
+            # Not enough data — fall back to simple gender mapping
+            return _fallback_voices(genders)
+
+        X = np.array([features[i] for i in valid_idx])
+        X = StandardScaler().fit_transform(X)
+
+        # Auto-select number of clusters (2–6 speakers max)
+        n_clusters = min(max(2, len(valid_idx) // 5), 6)
+        labels = AgglomerativeClustering(n_clusters=n_clusters).fit_predict(X)
+
+        # Map cluster → voice (consistent per cluster, respecting gender)
+        cluster_voice_map = {}
+        male_pool   = list(KIRI_MALE_VOICES)
+        female_pool = list(KIRI_FEMALE_VOICES)
+        male_idx_count   = 0
+        female_idx_count = 0
+
+        for pos, seg_i in enumerate(valid_idx):
+            cluster = labels[pos]
+            if cluster not in cluster_voice_map:
+                gender = genders[seg_i] or 'male'
+                if gender == 'male':
+                    cluster_voice_map[cluster] = male_pool[male_idx_count % len(male_pool)]
+                    male_idx_count += 1
+                else:
+                    cluster_voice_map[cluster] = female_pool[female_idx_count % len(female_pool)]
+                    female_idx_count += 1
+
+        # Build final voice list aligned to all segments
+        voices = []
+        vi = 0
+        for i, seg in enumerate(segments):
+            if i in valid_idx:
+                pos = valid_idx.index(i)
+                voices.append(cluster_voice_map.get(labels[pos], 'Chanda'))
+                vi += 1
+            else:
+                voices.append('Chanda')
+
+        print(f"[Speaker Cluster] Detected {n_clusters} unique speakers → voices: {cluster_voice_map}")
+        return voices
+
+    except Exception as e:
+        print(f"[Speaker Cluster Error] {e} — using fallback")
+        return _fallback_voices(genders)
+
+
+def _fallback_voices(genders: list) -> list:
+    """Simple fallback: Chanda for male, Maly for female."""
+    return ['Chanda' if (g or 'male') == 'male' else 'Maly' for g in genders]
+
+
+
+# ─────────────────────────────────────────────────────────────
 #  VIDEO DURATION
 # ─────────────────────────────────────────────────────────────
 def get_video_duration(video_path: str) -> float:
@@ -181,17 +273,22 @@ def generate_segment_tts(text: str, voice_id: str, out_path: str, options: dict 
     
     if engine == 'KiriTTS' and api_key:
         import requests
-        # Map Edge-TTS voice to standard KiriTTS voices based on gender
-        kiri_voice = 'Chanda' if ('Piseth' in voice_id or 'Christopher' in voice_id or 'Yunxi' in voice_id) else 'Maly'
+        # For KiriTTS, voice_id IS already the KiriTTS voice name (e.g. 'Chanda')
+        # when called from cluster mode. For Edge-TTS fallback, map from Edge-TTS voice ID.
+        if voice_id in KIRI_MALE_VOICES or voice_id in KIRI_FEMALE_VOICES:
+            kiri_voice = voice_id  # Already a KiriTTS voice name from clustering
+        else:
+            kiri_voice = 'Chanda' if ('Piseth' in voice_id or 'Christopher' in voice_id or 'Yunxi' in voice_id) else 'Maly'
         
         try:
-            url = 'https://api.kiritts.com/v1/speech'
+            url = 'https://api.kiritts.com/v1/audio/speech'
             headers = {
                 'Authorization': f'Bearer {api_key}',
                 'Content-Type': 'application/json'
             }
             data = {
-                'text': text,
+                'model': 'tts-1',
+                'input': text,
                 'voice': kiri_voice
             }
             res = requests.post(url, headers=headers, json=data)
@@ -255,6 +352,15 @@ def build_timed_audio(
     for i, seg in enumerate(segments):
         seg['gender'] = genders[i] or 'unknown'
 
+    # ── Step 1.5: Speaker clustering (KiriTTS only) ───────────
+    # Assigns a unique voice to each distinct character in the video
+    kiri_voices = None
+    if options and options.get('tts_engine') == 'KiriTTS' and options.get('kiritts_key', '').strip():
+        upd_msg = getattr(options, '_upd', None)  # won't work here, just print
+        print('[Speaker Cluster] Running speaker clustering for KiriTTS...')
+        kiri_voices = cluster_speakers(audio_path, segments, genders)
+        print(f'[Speaker Cluster] Voice assignments: {kiri_voices}')
+
     # ── Step 2: Generate ALL TTS clips in parallel ────────────
     tts_paths = [None] * n
 
@@ -263,7 +369,11 @@ def build_timed_audio(
         if not text:
             return i, None
         gender = genders[i] or 'male'
-        voice_id = voice_male if gender == 'male' else voice_female
+        # KiriTTS: use clustered voice; Edge-TTS: use gender-based voice
+        if kiri_voices is not None:
+            voice_id = kiri_voices[i]  # KiriTTS voice name e.g. 'Chanda'
+        else:
+            voice_id = voice_male if gender == 'male' else voice_female
         out_path = os.path.join(TEMP_DIR, f'{job_id}_seg{i}.mp3')
         generate_segment_tts(text, voice_id, out_path, options=options)
         return i, out_path
