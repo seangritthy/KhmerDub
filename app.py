@@ -510,7 +510,7 @@ class KhmerDubApp(ctk.CTk):
         # Target language dropdown
         self.lang_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.lang_frame.pack(pady=5, fill="x")
-        self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="Target Language:", font=("Segoe UI", 14))
+        self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="Dub Into:", font=("Segoe UI", 14, "bold"))
         self.lbl_lang.pack(side="left", padx=10)
         self.lang_var = ctk.StringVar(value="Khmer")
         self.opt_lang = ctk.CTkOptionMenu(self.lang_frame, variable=self.lang_var, values=["Khmer", "English", "Chinese"], font=("Segoe UI", 14))
@@ -577,7 +577,11 @@ class KhmerDubApp(ctk.CTk):
                     'outtmpl': os.path.join(TEMP_DIR, 'downloaded_%(id)s.%(ext)s'),
                     'progress_hooks': [progress_hook],
                     'quiet': True,
-                    'no_warnings': True
+                    'no_warnings': True,
+                    'source_address': '0.0.0.0', # Force IPv4 to prevent YouTube timeouts
+                    'socket_timeout': 30,
+                    'retries': 10,
+                    'fragment_retries': 10
                 }
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
