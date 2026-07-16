@@ -20,6 +20,7 @@ from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
+import yt_dlp
 import whisper
 from deep_translator import GoogleTranslator
 import edge_tts
@@ -442,7 +443,7 @@ class KhmerDubApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("KhmerDub - AI Video Translator")
-        self.geometry("700x550")
+        self.geometry("700x650")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         
@@ -455,11 +456,25 @@ class KhmerDubApp(ctk.CTk):
         self.lbl_title = ctk.CTkLabel(self.main_frame, text="KhmerDub AI Translator", font=("Segoe UI", 24, "bold"))
         self.lbl_title.pack(pady=15)
         
-        self.btn_select = ctk.CTkButton(self.main_frame, text="Select Video", command=self.select_video, font=("Segoe UI", 16))
-        self.btn_select.pack(pady=10)
+        # File selection frame
+        self.file_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.file_frame.pack(pady=10, fill="x")
         
-        self.lbl_file = ctk.CTkLabel(self.main_frame, text="No video selected", font=("Segoe UI", 12), text_color="gray")
-        self.lbl_file.pack()
+        self.btn_select = ctk.CTkButton(self.file_frame, text="Select Local Video", command=self.select_video, font=("Segoe UI", 14), width=180)
+        self.btn_select.pack(side="left", padx=10)
+        
+        self.lbl_file = ctk.CTkLabel(self.file_frame, text="No video selected", font=("Segoe UI", 12), text_color="gray")
+        self.lbl_file.pack(side="left", padx=10)
+        
+        # URL Download frame
+        self.url_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.url_frame.pack(pady=5, fill="x")
+        
+        self.url_entry = ctk.CTkEntry(self.url_frame, placeholder_text="Or paste video URL here (WeTV, YouTube, etc.)", font=("Segoe UI", 12), width=350)
+        self.url_entry.pack(side="left", padx=10)
+        
+        self.btn_download = ctk.CTkButton(self.url_frame, text="Download Video", command=self.start_download, font=("Segoe UI", 14), width=140, fg_color="#17a2b8", hover_color="#138496")
+        self.btn_download.pack(side="left", padx=5)
         
         self.chk_mirror_var = ctk.StringVar(value="off")
         self.chk_blur_var = ctk.StringVar(value="off")
@@ -485,6 +500,67 @@ class KhmerDubApp(ctk.CTk):
         if path:
             self.video_path = path
             self.lbl_file.configure(text=os.path.basename(path))
+            
+    def start_download(self):
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showerror("Error", "Please paste a URL first!")
+            return
+            
+        self.btn_download.configure(state="disabled", text="Downloading...")
+        self.lbl_status.configure(text="Downloading video... please wait.")
+        self.progress_bar.set(0)
+        
+        def download_thread():
+            try:
+                def progress_hook(d):
+                    if d['status'] == 'downloading':
+                        try:
+                            # Parse percentage from string like " 25.4%" or "\x1b[0;34m 25.4%\x1b[0m"
+                            p = d.get('_percent_str', '0%').replace('%', '').strip()
+                            import re
+                            p = re.sub(r'\x1b\[[0-9;]*m', '', p)
+                            pct = float(p)
+                            self.after(0, self.progress_bar.set, pct / 100.0)
+                            
+                            # Parse speed
+                            speed = d.get('_speed_str', 'N/A')
+                            speed = re.sub(r'\x1b\[[0-9;]*m', '', speed).strip()
+                            self.after(0, self.lbl_status.configure, text=f"Downloading... {pct}% ({speed})")
+                        except Exception:
+                            pass
+                    elif d['status'] == 'finished':
+                        self.after(0, self.lbl_status.configure, text="Download finished. Processing...")
+
+                ydl_opts = {
+                    'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                    'outtmpl': os.path.join(TEMP_DIR, 'downloaded_%(id)s.%(ext)s'),
+                    'progress_hooks': [progress_hook],
+                    'quiet': True,
+                    'no_warnings': True
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filepath = ydl.prepare_filename(info)
+                    
+                def on_success():
+                    self.video_path = filepath
+                    self.lbl_file.configure(text=f"Downloaded: {os.path.basename(filepath)}")
+                    self.lbl_status.configure(text="Video ready! Click Start Dubbing.")
+                    self.btn_download.configure(state="normal", text="Download Video")
+                    self.progress_bar.set(0)
+                    
+                self.after(0, on_success)
+                
+            except Exception as e:
+                def on_error():
+                    messagebox.showerror("Download Error", str(e))
+                    self.btn_download.configure(state="normal", text="Download Video")
+                    self.lbl_status.configure(text="Ready")
+                self.after(0, on_error)
+                
+        threading.Thread(target=download_thread, daemon=True).start()
             
     def update_status(self, kw):
         if 'progress' in kw:
