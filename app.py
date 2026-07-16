@@ -521,16 +521,16 @@ class KhmerDubApp(ctk.CTk):
                             import re
                             p = re.sub(r'\x1b\[[0-9;]*m', '', p)
                             pct = float(p)
-                            self.after(0, self.progress_bar.set, pct / 100.0)
+                            self.after(0, lambda: self.progress_bar.set(pct / 100.0))
                             
                             # Parse speed
                             speed = d.get('_speed_str', 'N/A')
                             speed = re.sub(r'\x1b\[[0-9;]*m', '', speed).strip()
-                            self.after(0, self.lbl_status.configure, text=f"Downloading... {pct}% ({speed})")
+                            self.after(0, lambda: self.lbl_status.configure(text=f"Downloading... {pct}% ({speed})"))
                         except Exception:
                             pass
                     elif d['status'] == 'finished':
-                        self.after(0, self.lbl_status.configure, text="Download finished. Processing...")
+                        self.after(0, lambda: self.lbl_status.configure(text="Download finished. Processing..."))
 
                 ydl_opts = {
                     'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
