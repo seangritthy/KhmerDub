@@ -338,11 +338,15 @@ def process_video(job_id: str, video_path: str, options: dict):
             message=f'✅ Dominant voice: {voice_lbl} — each line will be detected individually')
         time.sleep(0.6)
 
-        # ── 3. Transcribe ─────────────────────────────────────
+        # ── 3. Transcribe / Translate ─────────────────────────
         upd(job_id, stage='transcribe', progress=30,
-            message='📝 Transcribing speech with Whisper AI…')
+            message='📝 Analyzing speech with Whisper AI…')
         model         = get_whisper_model()
-        result        = model.transcribe(audio_path, task='transcribe')
+        
+        # If target is English, use Whisper's built-in Any-to-English translation task for maximum accuracy
+        whisper_task  = 'translate' if target_lang == 'English' else 'transcribe'
+        result        = model.transcribe(audio_path, task=whisper_task)
+        
         segments      = result.get('segments', [])
         original_text = result.get('text', '').strip()
         detected_lang = result.get('language', 'unknown')
@@ -360,7 +364,12 @@ def process_video(job_id: str, video_path: str, options: dict):
         translated_segments = []
         n_segs = len(segments)
         for i, seg in enumerate(segments):
-            t = robust_translate(seg['text'].strip(), dest=dest_code) or seg['text']
+            if target_lang == 'English' and whisper_task == 'translate':
+                # Whisper already translated it to English perfectly!
+                t = seg['text'].strip()
+            else:
+                t = robust_translate(seg['text'].strip(), dest=dest_code) or seg['text']
+                
             translated_segments.append({
                 'start': seg['start'],
                 'end':   seg['end'],
