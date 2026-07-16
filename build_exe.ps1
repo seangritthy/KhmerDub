@@ -69,13 +69,20 @@ Banner "Step 2 — Installing Python packages"
 INFO "This may take 5-10 minutes on first run (downloading Whisper etc.)..."
 
 $packages = @(
-    "flask",
-    "openai-whisper",
-    "deep-translator",
-    "edge-tts",
-    "librosa",
-    "numpy",
-    "werkzeug",
+    "flask>=2.3.0",
+    "openai-whisper>=20231117",
+    "deep-translator>=1.11.4",
+    "edge-tts>=6.1.9",
+    "librosa>=0.10.1",
+    "numpy>=1.24.0",
+    "ffmpeg-python>=0.2.0",
+    "werkzeug>=2.3.0",
+    "yt-dlp",
+    "customtkinter",
+    "demucs",
+    "opencv-python",
+    "pillow",
+    "google-generativeai",
     "pyinstaller"
 )
 
@@ -182,11 +189,20 @@ Write-Host ""
 Write-Host "  To run the app:" -ForegroundColor White
 Write-Host "  .\dist\KhmerDub\KhmerDub.exe" -ForegroundColor Green
 Write-Host ""
-Write-Host "  To share: zip the entire dist\KhmerDub\ folder." -ForegroundColor White
-Write-Host ""
+# ── Step 8: Create ZIP archive ────────────────────────────────
+Banner 'Step 8 — Creating ZIP archive for GitHub Release'
+$ZipTarget = Join-Path $ProjectDir 'KhmerDub-windows-standalone.zip'
+if (Test-Path $ZipTarget) { Remove-Item $ZipTarget -Force }
+Compress-Archive -Path (Join-Path $ProjectDir 'dist\KhmerDub\*') -DestinationPath $ZipTarget
+$ZipSizeMB = [math]::Round((Get-Item $ZipTarget).Length / 1MB, 1)
+OK ('Zip created: KhmerDub-windows-standalone.zip (' + $ZipSizeMB + ' MB)')
+
+Write-Host ''
+Write-Host '  To share: upload the KhmerDub-windows-standalone.zip file to GitHub Releases.' -ForegroundColor White
+Write-Host ''
 
 # Ask user if they want to launch now
-$launch = Read-Host "  Launch KhmerDub now? (Y/n)"
+$launch = Read-Host '  Launch KhmerDub now? (Y/n)'
 if ($launch -ne 'n' -and $launch -ne 'N') {
     Start-Process -FilePath $DistExe -WorkingDirectory (Split-Path $DistExe)
 }
