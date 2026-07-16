@@ -16,6 +16,7 @@ import subprocess
 import time
 import asyncio
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -212,7 +213,7 @@ def generate_segment_tts(text: str, voice_id: str, out_path: str, options: dict 
 # ─────────────────────────────────────────────────────────────
 def build_timed_audio(
     segments: list,
-    audio_path: str,          # original extracted audio for gender analysis
+    audio_path: str,
     video_duration: float,
     job_id: str,
     progress_callback=None,
@@ -221,17 +222,13 @@ def build_timed_audio(
     options: dict = None
 ) -> str:
     """
-    For each subtitle segment:
-      1. Detect gender from that time slice of audio
-      2. Choose male or female voice for target language
-      3. Generate TTS audio with correct voice
-      4. Overlay at exact start timestamp (NO speed adjustments)
-    Returns path to final mixed WAV.
+    Fast parallel version:
+      1. Pre-detect ALL segment genders in parallel
+      2. Generate ALL TTS clips in parallel (ThreadPoolExecutor)
+      3. Overlay clips at exact timestamps
     """
-    # Load original audio to keep background music. We will dynamically lower volume during TTS.
     try:
         master = AudioSegment.from_file(audio_path)
-        # Pad duration just in case TTS audio extends a bit past the end
         target_dur_ms = int(video_duration * 1000) + 10000
         if len(master) < target_dur_ms:
             master = master + AudioSegment.silent(duration=target_dur_ms - len(master))
@@ -240,62 +237,80 @@ def build_timed_audio(
         master = AudioSegment.silent(duration=int(video_duration * 1000) + 10000)
 
     n = len(segments)
+
+    # ── Step 1: Detect ALL genders in parallel ────────────────
+    def detect_gender_for_seg(seg):
+        return detect_segment_gender(audio_path, seg['start'], seg['end'])
+
+    genders = [None] * n
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(detect_gender_for_seg, seg): i for i, seg in enumerate(segments) if seg['text'].strip()}
+        for fut in as_completed(futures):
+            i = futures[fut]
+            try:
+                genders[i] = fut.result()
+            except Exception:
+                genders[i] = 'male'
+
     for i, seg in enumerate(segments):
+        seg['gender'] = genders[i] or 'unknown'
+
+    # ── Step 2: Generate ALL TTS clips in parallel ────────────
+    tts_paths = [None] * n
+
+    def generate_tts_for_seg(i, seg):
         text = seg['text'].strip()
         if not text:
-            seg['gender'] = 'unknown'
-            continue
-
-        start_sec = seg['start']
-        end_sec   = seg['end']
-        start_ms  = int(start_sec * 1000)
-
-        # ── Per-segment gender detection ──────────────────────
-        gender   = detect_segment_gender(audio_path, start_sec, end_sec)
+            return i, None
+        gender = genders[i] or 'male'
         voice_id = voice_male if gender == 'male' else voice_female
-        seg['gender'] = gender      # store for UI display
+        out_path = os.path.join(TEMP_DIR, f'{job_id}_seg{i}.mp3')
+        generate_segment_tts(text, voice_id, out_path, options=options)
+        return i, out_path
 
-        seg_tts_path = os.path.join(TEMP_DIR, f'{job_id}_seg{i}.mp3')
+    done_count = 0
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(generate_tts_for_seg, i, seg): i for i, seg in enumerate(segments)}
+        for fut in as_completed(futures):
+            try:
+                i, path = fut.result()
+                tts_paths[i] = path
+            except Exception as e:
+                print(f"[TTS parallel error] {e}")
+            done_count += 1
+            if progress_callback:
+                gender_label = genders[futures[fut]] or 'male'
+                progress_callback(int(done_count / n * 100), done_count, n, gender_label)
+
+    # ── Step 3: Overlay clips in order ───────────────────────
+    for i, seg in enumerate(segments):
+        path = tts_paths[i]
+        if not path or not os.path.exists(path):
+            continue
         try:
-            generate_segment_tts(text, voice_id, seg_tts_path, options=options)
-            clip = AudioSegment.from_file(seg_tts_path)
-            
-            # ── Smart Emotion Punctuation ─────────────────────────
+            clip = AudioSegment.from_file(path)
+            text = seg['text'].strip()
+
             if options and options.get('smart_emotion'):
-                if text.endswith('!') or text.endswith('?!') or text.endswith('! '):
-                    # Angry/Excited: Louder, Faster, Higher Pitch
+                if text.endswith('!') or text.endswith('?!'):
                     clip = clip + 3
                     clip = speed_change(clip, 1.15)
-                elif text.endswith('...') or text.endswith('..') or text.endswith('…'):
-                    # Sad/Hesitant: Quieter, Slower, Lower Pitch
+                elif text.endswith('...') or text.endswith('…'):
                     clip = clip - 2
                     clip = speed_change(clip, 0.85)
 
-            # Smart Ducking: Lower original audio by 15dB ONLY during this specific TTS clip
-            clip_len = len(clip)
-            end_ms = start_ms + clip_len
-            
-            # Extract the original background chunk for this duration
-            bg_chunk = master[start_ms:end_ms]
-            # Lower its volume significantly
-            bg_chunk = bg_chunk - 15
-            # Overlay the loud Khmer TTS on top of the quieted background chunk
-            bg_chunk = bg_chunk.overlay(clip)
-            
-            # Splice the processed chunk back into the master track
-            master = master[:start_ms] + bg_chunk + master[end_ms:]
-
+            start_ms = int(seg['start'] * 1000)
+            clip_len  = len(clip)
+            end_ms    = start_ms + clip_len
+            bg_chunk  = master[start_ms:end_ms] - 15
+            bg_chunk  = bg_chunk.overlay(clip)
+            master    = master[:start_ms] + bg_chunk + master[end_ms:]
         except Exception as e:
-            print(f'[TTS seg {i} {gender}] Error: {e}')
+            print(f'[Overlay seg {i}] Error: {e}')
         finally:
-            if os.path.exists(seg_tts_path):
-                try: os.remove(seg_tts_path)
-                except: pass
+            try: os.remove(path)
+            except: pass
 
-        if progress_callback:
-            progress_callback(int((i+1)/n*100), i+1, n, gender)
-
-    # Export master track
     out_path = os.path.join(TEMP_DIR, f'{job_id}_timed_dub.wav')
     master.export(out_path, format='wav')
     return out_path
@@ -425,8 +440,9 @@ def process_video(job_id: str, video_path: str, options: dict):
             })
             if i % 5 == 0 or i == n_segs - 1:
                 upd(job_id, message=f'🌏 Translating segments… ({i+1}/{n_segs})')
-            # Add small delay between requests to avoid getting IP blocked
-            time.sleep(0.3)
+            # Small delay only for non-English to avoid IP block
+            if target_lang != 'English':
+                time.sleep(0.1)
 
         # Translate full text for display by joining segments (avoids 5000 char limit)
         translated_text = " ".join([s['text'] for s in translated_segments])
@@ -435,11 +451,10 @@ def process_video(job_id: str, video_path: str, options: dict):
             translated_text=translated_text,
             segments=translated_segments,
             message=f'✅ {len(translated_segments)} segments translated to {lang_label}')
-        time.sleep(0.3)
 
-        # ── 5. Timed TTS — per-segment gender detection ───────
+        # ── 5. Timed TTS — parallel gender detection + TTS ───
         upd(job_id, stage='tts', progress=60,
-            message=f'🔊 Generating timed dubbing — detecting gender per line (natural speed)…')
+            message=f'🔊 Generating timed dubbing in parallel…')
 
         video_duration = get_video_duration(video_path)
 
@@ -455,7 +470,6 @@ def process_video(job_id: str, video_path: str, options: dict):
         # Update segments with gender info for UI
         upd(job_id, segments=translated_segments, progress=83,
             message=f'✅ Timed {lang_label} audio track ready')
-        time.sleep(0.3)
 
         # ── 5.5 Write SRT (needed for burning) ─────────────────
         srt_file = os.path.join(OUTPUT_DIR, f'{job_id}_khmer.srt')
