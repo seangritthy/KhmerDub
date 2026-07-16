@@ -542,20 +542,39 @@ class KhmerDubApp(ctk.CTk):
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
-                    filepath = ydl.prepare_filename(info)
+                    
+                    if 'requested_downloads' in info and len(info['requested_downloads']) > 0:
+                        filepath = info['requested_downloads'][0].get('filepath') or ydl.prepare_filename(info)
+                    else:
+                        filepath = ydl.prepare_filename(info)
+                        
+                    # yt-dlp sometimes changes the extension (e.g. to .mkv) after merging
+                    if not os.path.exists(filepath):
+                        base = os.path.splitext(filepath)[0]
+                        import glob
+                        matches = glob.glob(base + ".*")
+                        if matches:
+                            filepath = matches[0]
                     
                 def on_success():
                     self.video_path = filepath
                     self.lbl_file.configure(text=f"Downloaded: {os.path.basename(filepath)}")
-                    self.lbl_status.configure(text="Video ready! Click Start Dubbing.")
+                    self.lbl_status.configure(text="Video ready! Starting dubbing automatically...")
                     self.btn_download.configure(state="normal", text="Download Video")
                     self.progress_bar.set(0)
+                    # Automatically start dubbing!
+                    self.start_dubbing()
                     
                 self.after(0, on_success)
                 
             except Exception as e:
+                import traceback
+                print(traceback.format_exc())
+                err_msg = getattr(e, 'msg', str(e))
+                if not err_msg or err_msg == "None":
+                    err_msg = repr(e)
                 def on_error():
-                    messagebox.showerror("Download Error", str(e))
+                    messagebox.showerror("Download Error", f"Failed to download video:\n{err_msg}")
                     self.btn_download.configure(state="normal", text="Download Video")
                     self.lbl_status.configure(text="Ready")
                 self.after(0, on_error)
