@@ -19,15 +19,34 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import customtkinter as ctk
+import json
 from tkinter import filedialog, messagebox
 
 import yt_dlp
 import whisper
 from deep_translator import GoogleTranslator
 import edge_tts
+import argparse
 import librosa
 import numpy as np
 from pydub import AudioSegment
+
+def get_bin_path(bin_name):
+    # Determine the directory of the executable or script
+    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    
+    # Check if bundled in ffmpeg_bin (PyInstaller)
+    bundled_path = os.path.join(base_dir, 'ffmpeg_bin', bin_name)
+    if os.path.exists(bundled_path):
+        return bundled_path
+        
+    local_path = os.path.join(base_dir, bin_name)
+    if os.path.exists(local_path):
+        return local_path
+    return bin_name
+
+FFMPEG_CMD = get_bin_path('ffmpeg.exe' if os.name == 'nt' else 'ffmpeg')
+FFPROBE_CMD = get_bin_path('ffprobe.exe' if os.name == 'nt' else 'ffprobe')
 import cv2
 from PIL import Image
 import google.generativeai as genai
@@ -36,6 +55,7 @@ import google.generativeai as genai
 _BASE      = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(os.path.expanduser('~'), 'KhmerDub_Output')
 TEMP_DIR = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'KhmerDub', 'temp')
+API_KEYS_PATH = os.path.join(TEMP_DIR, 'api_keys.json')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
@@ -71,9 +91,9 @@ def debug_log(msg):
 
 
 # ── Bundle FFmpeg into PATH ──────────────────────────────────
-_ffmpeg_bin = os.path.join(_BASE, 'ffmpeg_bin')
-if os.path.isdir(_ffmpeg_bin):
-    os.environ['PATH'] = _ffmpeg_bin + os.pathsep + os.environ.get('PATH', '')
+# Add the base directory (sys._MEIPASS) to PATH so that third-party libs like whisper
+# can find the bundled ffmpeg.exe when they call subprocess.run(['ffmpeg', ...])
+os.environ['PATH'] = _BASE + os.pathsep + os.environ.get('PATH', '')
 
 _whisper_model = None
 app_gui = None  # Global reference to GUI
@@ -206,7 +226,7 @@ def gender_to_label(gender: str) -> str:
 #  SPEAKER CLUSTERING — assign unique voice per character
 # ─────────────────────────────────────────────────────────────
 # Available KiriTTS voices per gender
-KIRI_MALE_VOICES   = ['Chanda', 'Bora', 'Arun', 'Oudom', 'Rithy', 'Setha']
+KIRI_MALE_VOICES   = ['Chanda', 'Bora', 'Arun', 'Oudom', 'Rithy', 'Setha', 'Rithy Seang']
 KIRI_FEMALE_VOICES = ['Maly', 'Neary', 'Phanin', 'Theary']
 
 def cluster_speakers(audio_path: str, segments: list, genders: list, voice_male: str = 'Rithy', voice_female: str = 'Maly') -> list:
@@ -261,19 +281,47 @@ def cluster_speakers(audio_path: str, segments: list, genders: list, voice_male:
             cluster_genders[cluster][gender] += 1
             
         cluster_voice_map = {}
+        import random
+        used_males = set()
+        used_females = set()
+
         for cluster, counts in cluster_genders.items():
             majority_gender = 'male' if counts['male'] >= counts['female'] else 'female'
-            cluster_voice_map[cluster] = voice_male if majority_gender == 'male' else voice_female
+            if majority_gender == 'male':
+                if voice_male == "Auto Detect":
+                    available = [v for v in KIRI_MALE_VOICES if v not in used_males]
+                    if not available:
+                        available = KIRI_MALE_VOICES # reset if exhausted
+                    chosen = random.choice(available) if available else "Rithy"
+                    used_males.add(chosen)
+                    cluster_voice_map[cluster] = chosen
+                else:
+                    cluster_voice_map[cluster] = voice_male
+            else:
+                if voice_female == "Auto Detect":
+                    available = [v for v in KIRI_FEMALE_VOICES if v not in used_females]
+                    if not available:
+                        available = KIRI_FEMALE_VOICES
+                    chosen = random.choice(available) if available else "Maly"
+                    used_females.add(chosen)
+                    cluster_voice_map[cluster] = chosen
+                else:
+                    cluster_voice_map[cluster] = voice_female
 
         # Build final voice list aligned to all segments
         voices = []
         for i, seg in enumerate(segments):
             if i in valid_idx:
                 pos = valid_idx.index(i)
-                fallback_voice = voice_male if (genders[i] or 'male') == 'male' else voice_female
+                fallback_voice = cluster_voice_map[labels[pos]] # we know it exists from the map above
                 voices.append(cluster_voice_map.get(labels[pos], fallback_voice))
             else:
-                fallback_voice = voice_male if (genders[i] or 'male') == 'male' else voice_female
+                # If segment was unclusterable but has a gender
+                is_male = (genders[i] or 'male') == 'male'
+                if is_male:
+                    fallback_voice = random.choice(KIRI_MALE_VOICES) if (voice_male == "Auto Detect" and KIRI_MALE_VOICES) else voice_male
+                else:
+                    fallback_voice = random.choice(KIRI_FEMALE_VOICES) if (voice_female == "Auto Detect" and KIRI_FEMALE_VOICES) else voice_female
                 voices.append(fallback_voice)
 
         print(f"[Speaker Cluster] Detected {n_clusters} unique characters → voices: {cluster_voice_map}")
@@ -286,6 +334,11 @@ def cluster_speakers(audio_path: str, segments: list, genders: list, voice_male:
 
 def _fallback_voices(genders: list, voice_male: str = 'Rithy', voice_female: str = 'Maly') -> list:
     """Fallback if clustering fails: directly map male/female."""
+    import random
+    if voice_male == "Auto Detect":
+        voice_male = random.choice(KIRI_MALE_VOICES) if KIRI_MALE_VOICES else 'Rithy'
+    if voice_female == "Auto Detect":
+        voice_female = random.choice(KIRI_FEMALE_VOICES) if KIRI_FEMALE_VOICES else 'Maly'
     voices = []
     for g in genders:
         voices.append(voice_male if (g or 'male') == 'male' else voice_female)
@@ -298,7 +351,7 @@ def _fallback_voices(genders: list, voice_male: str = 'Rithy', voice_female: str
 def get_video_duration(video_path: str) -> float:
     """Return video duration in seconds using ffprobe."""
     result = subprocess.run(
-        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+        [FFPROBE_CMD, '-v', 'error', '-show_entries', 'format=duration',
          '-of', 'default=noprint_wrappers=1:nokey=1', video_path],
         capture_output=True, text=True
     )
@@ -353,12 +406,18 @@ def generate_segment_tts(text: str, voice_id: str, out_path: str, options: dict 
     
     if engine == 'KiriTTS' and api_key:
         import requests
-        # For KiriTTS, voice_id IS already the KiriTTS voice name (e.g. 'Chanda')
-        # when called from cluster mode. For Edge-TTS fallback, map from Edge-TTS voice ID.
-        if voice_id in KIRI_MALE_VOICES or voice_id in KIRI_FEMALE_VOICES:
-            kiri_voice = voice_id  # Already a KiriTTS voice name from clustering
+        # Strip display suffix added for clone voices in the UI
+        clean_voice_id = voice_id.replace(' (Clone)', '').strip()
+        # Build list of known KiriTTS voices (without display suffixes)
+        all_kiri_clean = [v.replace(' (Clone)', '') for v in KIRI_MALE_VOICES + KIRI_FEMALE_VOICES]
+
+        if clean_voice_id in all_kiri_clean and clean_voice_id != 'Auto Detect':
+            kiri_voice = clean_voice_id  # Already a valid KiriTTS voice name
         else:
-            kiri_voice = 'Chanda' if ('Piseth' in voice_id or 'Christopher' in voice_id or 'Yunxi' in voice_id) else 'Maly'
+            # Map Edge-TTS voice ID → KiriTTS gender default
+            is_male_edge = any(k in voice_id for k in ('Piseth', 'Christopher', 'Yunxi', 'Guy'))
+            # Better default: use Rithy Seang (the user's clone) for male, Maly for female
+            kiri_voice = 'Rithy Seang' if is_male_edge or voice_id in ('Auto Detect', '') else 'Maly'
         
         try:
             url = 'https://api.kiritts.com/v1/audio/speech'
@@ -371,28 +430,20 @@ def generate_segment_tts(text: str, voice_id: str, out_path: str, options: dict 
                 'input': text,
                 'voice': kiri_voice
             }
-            res = requests.post(url, headers=headers, json=data)
+            res = requests.post(url, headers=headers, json=data, timeout=15)
             if res.status_code == 200:
                 with open(out_path, 'wb') as f:
                     f.write(res.content)
                 
-                # Apply speed change if requested since KiriTTS API doesn't support rate
-                speed_str = options.get('voice_speed', '1.0x').replace('x', '')
-                try: speed_float = float(speed_str)
-                except ValueError: speed_float = 1.0
-                if speed_float != 1.0:
-                    try:
-                        clip = AudioSegment.from_file(out_path)
-                        clip = speed_change(clip, speed_float)
-                        clip.export(out_path, format="mp3")
-                    except Exception as ex:
-                        print(f"[KiriTTS Speed Error] {ex}")
+                # KiriTTS does not support speed change; keep original speed to avoid artifacts.
+                # (speed adjustment disabled for KiriTTS)
+                # No speed processing performed here.
 
                 return  # Success!
             else:
-                print(f"[KiriTTS Error] {res.status_code}: {res.text}. Falling back to Edge-TTS...")
+                debug_log(f"[KiriTTS Error] Voice: {kiri_voice}, Code: {res.status_code}, Res: {res.text}. Falling back to Edge-TTS...")
         except Exception as e:
-            print(f"[KiriTTS Request Failed] {e}. Falling back to Edge-TTS...")
+            debug_log(f"[KiriTTS Request Failed] Voice: {kiri_voice}, Error: {e}. Falling back to Edge-TTS...")
 
     # Default/Fallback: Edge-TTS
     if voice_id in KIRI_MALE_VOICES or voice_id in KIRI_FEMALE_VOICES:
@@ -439,10 +490,22 @@ def build_timed_audio(
 
     # ── Step 1: Detect ALL genders in parallel ────────────────
     def detect_gender_for_seg(seg):
-        api_key = options.get('gemini_key') if options else None
+        api_key = options.get('translator_key') if options and 'Gemini' in options.get('translator', '') else (options.get('transcriber_key') if options else None)
         return detect_segment_gender(original_audio_path or audio_path, seg['start'], seg['end'], video_path=video_path, api_key=api_key)
 
-    if genders is None:
+    forced_gender = None
+    if options:
+        dub_gender_opt = options.get('dub_gender', 'Auto Detect')
+        if dub_gender_opt == 'Male Only':
+            forced_gender = 'male'
+        elif dub_gender_opt == 'Female Only':
+            forced_gender = 'female'
+
+    if forced_gender:
+        # User chose a fixed gender — skip auto-detection entirely
+        genders = [forced_gender] * n
+        print(f'[Gender] Forced to {forced_gender} for all {n} segments (no auto-detect)')
+    elif genders is None:
         genders = [None] * n
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {pool.submit(detect_gender_for_seg, seg): i for i, seg in enumerate(segments) if seg['text'].strip()}
@@ -506,6 +569,17 @@ def build_timed_audio(
             clip = AudioSegment.from_file(path)
             text = seg['text'].strip()
 
+            # Apply speed for KiriTTS using the user's chosen speed dropdown value
+            engine = options.get('tts_engine', 'Edge-TTS') if options else 'Edge-TTS'
+            if engine == 'KiriTTS':
+                speed_str = options.get('voice_speed', '1.0x').replace('x', '') if options else '1.0'
+                try:
+                    speed_float = float(speed_str)
+                except ValueError:
+                    speed_float = 1.0
+                if speed_float != 1.0:
+                    clip = speed_change(clip, speed_float)
+
             if options and options.get('smart_emotion'):
                 if text.endswith('!') or text.endswith('?!'):
                     clip = clip + 3
@@ -526,11 +600,12 @@ def build_timed_audio(
             if sequential_mode:
                 curr_time = end_ms + 800  # 800ms pause between sentences
             
-            # Duck the background
-            ducked = bg_layer[start_ms:end_ms] - 15
-            bg_layer = bg_layer[:start_ms] + ducked + bg_layer[end_ms:]
+            # Completely silence the original audio during dubbed segments
+            # (replaces old -15dB duck which still let the original voice bleed through)
+            silence = AudioSegment.silent(duration=end_ms - start_ms)
+            bg_layer = bg_layer[:start_ms] + silence + bg_layer[end_ms:]
             
-            # Overlay speech on the separate speech layer to avoid ducking previous overlapping speech
+            # Overlay speech on the separate speech layer
             speech_layer = speech_layer.overlay(clip, position=start_ms)
             
         except Exception as e:
@@ -797,14 +872,15 @@ def process_video(job_id: str, video_path: str, options: dict):
     lang_label = lang_cfg['label']
 
     try:
-        transcriber_engine = options.get('transcriber', 'Whisper (Local)')
-        gemini_key = options.get('gemini_key', '').strip()
-        translator_engine = options.get('translator', 'Google Translate')
+        transcriber_engine = options.get('transcriber', 'Whisper Local (Free)')
+        transcriber_key = options.get('transcriber_key', '').strip()
+        translator_key = options.get('translator_key', '').strip()
+        translator_engine = options.get('translator', 'Google Translate (Free)')
         
-        if transcriber_engine == 'Gemini AI (Pro)' and gemini_key:
+        if transcriber_engine == 'Gemini AI (Premium API)' and transcriber_key:
             # ── GEMINI NATIVE PIPELINE ──
             upd(job_id, stage='transcribe', progress=10, message='☁️ Initiating Gemini Native Transcription…')
-            segments = gemini_transcribe_video(video_path, gemini_key, lang_label, upd_callback=upd, job_id=job_id)
+            segments = gemini_transcribe_video(video_path, transcriber_key, lang_label, upd_callback=upd, job_id=job_id)
             if not segments:
                 raise Exception("Gemini failed to return valid JSON segments. Ensure your API key is correct and try again.")
             
@@ -844,7 +920,7 @@ def process_video(job_id: str, video_path: str, options: dict):
             
             debug_log("Starting subprocess ffmpeg extraction")
             subprocess.run(
-                ['ffmpeg', '-i', video_path,
+                [FFMPEG_CMD, '-i', video_path,
                  '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
                  audio_path, '-y'],
                 check=True, capture_output=True
@@ -871,34 +947,59 @@ def process_video(job_id: str, video_path: str, options: dict):
                     debug_log("Vocal removal failed to output file, falling back to original audio.")
 
             # ── 2. Transcribe using Whisper ───────────────────────
-            speed_str = options.get('speed', 'Whisper Large (Perfect, Slow)')
-            if "Large" in speed_str:
-                model_size = "large"
-            elif "Medium" in speed_str:
-                model_size = "medium"
-            else:
-                model_size = "base"
-            
-            upd(job_id, stage='transcribe', progress=20,
-                message=f'📦 Downloading/Loading Whisper {model_size.upper()} AI... (This takes a few minutes)')
-            
-            debug_log(f"Loading whisper model: {model_size}")
-            import whisper
-            model = whisper.load_model(model_size)
-            
             whisper_task = 'translate' if target_lang == 'English' else 'transcribe'
-            debug_log(f"Running whisper transcribe with task: {whisper_task}")
             
-            upd(job_id, stage='transcribe', progress=25,
-                message=f'📝 Transcribing audio with {model_size.upper()} AI... (This is very slow on CPU)')
-            
-            result = model.transcribe(
-                audio_path, 
-                fp16=False, 
-                task=whisper_task,
-                condition_on_previous_text=False
-            )
-            segments = result.get('segments', [])
+            if 'Premium API' in transcriber_engine:
+                if not transcriber_key:
+                    raise Exception(f"Please provide an API Key for {transcriber_engine}.")
+                
+                upd(job_id, stage='transcribe', progress=20,
+                    message=f'☁️ Transcribing audio with {transcriber_engine}…')
+                
+                import requests
+                headers = {'Authorization': f'Bearer {transcriber_key}'}
+                url = 'https://api.groq.com/openai/v1/audio/transcriptions' if 'Groq' in transcriber_engine else 'https://api.openai.com/v1/audio/transcriptions'
+                model_name = 'whisper-large-v3' if 'Groq' in transcriber_engine else 'whisper-1'
+                
+                with open(audio_path, 'rb') as f:
+                    files = {'file': (os.path.basename(audio_path), f, 'audio/wav')}
+                    data = {'model': model_name, 'response_format': 'verbose_json'}
+                    if 'OpenAI' in transcriber_engine:
+                        data['timestamp_granularities[]'] = 'segment'
+                    res = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+                
+                if res.status_code != 200:
+                    raise Exception(f"{transcriber_engine} API Error: {res.text}")
+                    
+                segments = res.json().get('segments', [])
+            else:
+                speed_str = options.get('speed', 'Whisper Medium (Great, Mod)')
+                if "Large" in speed_str:
+                    model_size = "large"
+                elif "Medium" in speed_str:
+                    model_size = "medium"
+                else:
+                    model_size = "base"
+                
+                upd(job_id, stage='transcribe', progress=20,
+                    message=f'📦 Downloading/Loading Whisper {model_size.upper()} AI... (This takes a few minutes)')
+                
+                debug_log(f"Loading whisper model: {model_size}")
+                import whisper
+                model = whisper.load_model(model_size)
+                
+                debug_log(f"Running whisper transcribe with task: {whisper_task}")
+                
+                upd(job_id, stage='transcribe', progress=25,
+                    message=f'📝 Transcribing audio with {model_size.upper()} AI... (This is very slow on CPU)')
+                
+                result = model.transcribe(
+                    audio_path, 
+                    fp16=False, 
+                    task=whisper_task,
+                    condition_on_previous_text=False
+                )
+                segments = result.get('segments', [])
             
             if not segments:
                 raise Exception("No speech found in the video.")
@@ -912,10 +1013,10 @@ def process_video(job_id: str, video_path: str, options: dict):
 
             video_file = None
 
-            if translator_engine == 'Gemini AI (Pro)' and gemini_key:
+            if translator_engine == 'Gemini AI (Premium API)' and translator_key:
                 upd(job_id, message='☁️ Uploading video to Gemini for visual context…')
                 import google.generativeai as genai
-                genai.configure(api_key=gemini_key)
+                genai.configure(api_key=translator_key)
                 try:
                     video_file = genai.upload_file(path=video_path)
                     upd(job_id, message='⏳ Waiting for Gemini to process video…')
@@ -931,12 +1032,12 @@ def process_video(job_id: str, video_path: str, options: dict):
             if options.get('story_mode'):
                 upd(job_id, stage='translate', progress=48, message=f'📖 Writing AI Story in {lang_label}…')
                 
-                if not gemini_key:
-                    raise Exception("Storytelling Mode requires a Gemini API Key. Please enter your API key in the 'Gemini/DeepSeek Key' text box.")
+                if not translator_key:
+                    raise Exception("Storytelling Mode requires a Gemini API Key. Please enter your Gemini API key in the Translator Key box.")
                     
                 try:
                     import google.generativeai as genai
-                    genai.configure(api_key=gemini_key)
+                    genai.configure(api_key=translator_key)
                     
                     transcript = "\n".join([f"[{s['start']:.1f}s - {s['end']:.1f}s]: {s['text']}" for s in segments])
                     prompt = (f"You are an expert movie narrator. Watch this video and read the following dialogue transcript. "
@@ -989,10 +1090,10 @@ def process_video(job_id: str, video_path: str, options: dict):
                     chunk = texts_to_translate[i:i + chunk_size]
                     upd(job_id, message=f'🌏 Translating batch {i//chunk_size + 1}…')
                     
-                    if translator_engine == 'Gemini AI (Pro)' and gemini_key:
-                        translated_texts.extend(gemini_translate_batch(chunk, human_dest=lang_label, dest_code=dest_code, api_key=gemini_key, video_file=video_file))
-                    elif translator_engine == 'DeepSeek API' and gemini_key:
-                        translated_texts.extend(deepseek_translate_batch(chunk, human_dest=lang_label, dest_code=dest_code, api_key=gemini_key))
+                    if translator_engine == 'Gemini AI (Premium API)' and translator_key:
+                        translated_texts.extend(gemini_translate_batch(chunk, human_dest=lang_label, dest_code=dest_code, api_key=translator_key, video_file=video_file))
+                    elif translator_engine == 'DeepSeek (Premium API)' and translator_key:
+                        translated_texts.extend(deepseek_translate_batch(chunk, human_dest=lang_label, dest_code=dest_code, api_key=translator_key))
                     else:
                         translated_texts.extend(robust_translate_batch(chunk, dest=dest_code))
                     
@@ -1030,10 +1131,15 @@ def process_video(job_id: str, video_path: str, options: dict):
         video_duration = AudioSegment.from_file(original_audio_path).duration_seconds
         
         is_story = options.get('story_mode', False)
+        # Resolve voice: 'Auto Detect' means use the language default, not literally 'Auto Detect'
+        opt_voice_male = options.get('voice_male', '')
+        opt_voice_female = options.get('voice_female', '')
+        resolved_male = opt_voice_male if (opt_voice_male and opt_voice_male != 'Auto Detect') else voice_male
+        resolved_female = opt_voice_female if (opt_voice_female and opt_voice_female != 'Auto Detect') else voice_female
         timed_dub = build_timed_audio(
-            translated_segments, audio_path, video_duration, job_id, tts_progress, 
-            voice_male=options.get('voice_male') or voice_male, 
-            voice_female=options.get('voice_female') or voice_female, 
+            translated_segments, audio_path, video_duration, job_id, tts_progress,
+            voice_male=resolved_male,
+            voice_female=resolved_female,
             options=options, 
             original_audio_path=original_audio_path, 
             video_path=video_path,
@@ -1069,7 +1175,7 @@ def process_video(job_id: str, video_path: str, options: dict):
         vf_filters.append(f"subtitles='{srt_path_ffmpeg}':fontsdir='{fonts_dir_ffmpeg}':force_style='{style_escaped}'")
         
         ffmpeg_cmd = [
-            'ffmpeg', '-i', video_path, '-i', timed_dub
+            FFMPEG_CMD, '-i', video_path, '-i', timed_dub
         ]
         ffmpeg_cmd.extend(['-vf', ','.join(vf_filters)])
         ffmpeg_cmd.extend(['-c:v', 'libx264', '-preset', 'fast', '-crf', '24'])
@@ -1101,23 +1207,125 @@ def process_video(job_id: str, video_path: str, options: dict):
                 try: os.remove(p)
                 except: pass
 
+
+# ── UI TEXT DICTIONARY ──────────────────────────
+UI_TEXT = {
+    "en": {
+        "title": "BongbeeAI dub",
+        "select_local": "Select Local Video",
+        "no_video": "No video selected",
+        "url_placeholder": "Or paste video URL here (WeTV, YouTube, etc.)",
+        "download": "Download Video",
+        "lbl_lang": "1. Dub Into:",
+        "sel_lang": "Select Language...",
+        "lbl_transcriber": "2. Transcriber:",
+        "sel_transcriber": "Select Transcriber...",
+        "lbl_speed": "Speed:",
+        "lbl_transcriber_key": "API Key:",
+        "ent_transcriber_key": "API Key...",
+        "get_groq_key": "Get Free Groq Key",
+        "lbl_trans": "3. Translator:",
+        "sel_translator": "Select Translator...",
+        "lbl_translator_key": "API Key:",
+        "ent_translator_key": "API Key...",
+        "lbl_engine": "4. Voice Engine:",
+        "sel_engine": "Select Engine...",
+        "lbl_voice_speed": "Speed:",
+        "lbl_key": "KiriTTS Key:",
+        "ent_key": "sk-...",
+        "lbl_profile": "Profile:",
+        "ent_profile": "Profile name",
+        "save_keys": "💾 Save Keys",
+        "lbl_male": "Male Voice:",
+        "auto_detect": "Auto Detect",
+        "lbl_female": "Female Voice:",
+        "lbl_dub_gender": "Dub As:",
+        "male_only": "Male Only",
+        "female_only": "Female Only",
+        "chk_story": "Enable Storytelling Mode",
+        "chk_vocals": "Remove Vocals",
+        "chk_mirror": "Mirror Video",
+        "chk_blur": "Hide Watermarks",
+        "start_dubbing": "Start Dubbing",
+        "ready": "Ready",
+        "ui_lang": "UI Lang:"
+    },
+    "km": {
+        "title": "BongbeeAI dub",
+        "select_local": "ជ្រើសរើសវីដេអូ",
+        "no_video": "មិនមានវីដេអូទេ",
+        "url_placeholder": "ឬដាក់តំណរវីដេអូ (WeTV, YouTube...)",
+        "download": "ទាញយកវីដេអូ",
+        "lbl_lang": "១. បញ្ចូលសំឡេងជា:",
+        "sel_lang": "ជ្រើសរើសភាសា...",
+        "lbl_transcriber": "២. បំប្លែងសំឡេង:",
+        "sel_transcriber": "ជ្រើសរើសកម្មវិធី...",
+        "lbl_speed": "ល្បឿន:",
+        "lbl_transcriber_key": "សោ API:",
+        "ent_transcriber_key": "សោ API...",
+        "get_groq_key": "យកសោ Groq ឥតគិតថ្លៃ",
+        "lbl_trans": "៣. អ្នកបកប្រែ:",
+        "sel_translator": "ជ្រើសរើសអ្នកបកប្រែ...",
+        "lbl_translator_key": "សោ API:",
+        "ent_translator_key": "សោ API...",
+        "lbl_engine": "៤. កម្មវិធីសំឡេង:",
+        "sel_engine": "ជ្រើសរើសកម្មវិធី...",
+        "lbl_voice_speed": "ល្បឿន:",
+        "lbl_key": "សោ KiriTTS:",
+        "ent_key": "sk-...",
+        "lbl_profile": "ទម្រង់:",
+        "ent_profile": "ឈ្មោះទម្រង់",
+        "save_keys": "💾 រក្សាទុក",
+        "lbl_male": "សំឡេងប្រុស:",
+        "auto_detect": "ស្វែងរកស្វ័យប្រវត្តិ",
+        "lbl_female": "សំឡេងស្រី:",
+        "lbl_dub_gender": "បញ្ចូលជា:",
+        "male_only": "ប្រុសប៉ុណ្ណោះ",
+        "female_only": "ស្រីប៉ុណ្ណោះ",
+        "chk_story": "របៀបនិទានរឿង",
+        "chk_vocals": "ដកសំឡេងច្រៀងចេញ",
+        "chk_mirror": "ត្រឡប់វីដេអូ (Mirror)",
+        "chk_blur": "លុបឡូហ្គោ",
+        "start_dubbing": "ចាប់ផ្តើមបញ្ចូលសំឡេង",
+        "ready": "រួចរាល់",
+        "ui_lang": "ភាសា UI:"
+    }
+}
+
 class KhmerDubApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         global app_gui
         app_gui = self  
-        self.title("KhmerDub - AI Video Translator")
+        self.title("BongbeeAI dub")
         self.geometry("700x650")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         
         self.video_path = None
         
+        try:
+            self.iconbitmap(get_bin_path('icon.ico'))
+        except: pass
+        
+        try:
+            ctk.FontManager.load_font(get_bin_path('Battambang-Regular.ttf'))
+        except Exception as e:
+            debug_log(f"Failed to load Battambang font: {e}")
+            
         # UI Layout
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.pack(pady=20, padx=20, fill="both", expand=True)
         
-        self.lbl_title = ctk.CTkLabel(self.main_frame, text="KhmerDub AI Translator", font=("Segoe UI", 24, "bold"))
+        self.ui_lang_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.ui_lang_frame.pack(fill="x", padx=10, pady=(0, 10))
+        self.lbl_ui_lang = ctk.CTkLabel(self.ui_lang_frame, text="UI Lang:", font=("Segoe UI", 12))
+        self.lbl_ui_lang.pack(side="right", padx=5)
+        self.ui_lang_var = ctk.StringVar(value="en")
+        self.opt_ui_lang = ctk.CTkOptionMenu(self.ui_lang_frame, variable=self.ui_lang_var, values=["en", "km"], font=("Segoe UI", 12), width=60, command=self.update_ui_language)
+        self.opt_ui_lang.pack(side="right")
+        
+        self.lbl_title = ctk.CTkLabel(self.main_frame, text="BongbeeAI dub", font=("Segoe UI", 24, "bold"))
         self.lbl_title.pack(pady=15)
         
         self.file_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
@@ -1140,100 +1348,118 @@ class KhmerDubApp(ctk.CTk):
         
         self.lang_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.lang_frame.pack(pady=5, fill="x")
-        self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="Dub Into:", font=("Segoe UI", 14, "bold"))
+        self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="1. Dub Into:", font=("Segoe UI", 14, "bold"))
         self.lbl_lang.pack(side="left", padx=10)
-        self.lang_var = ctk.StringVar(value="Khmer")
-        self.opt_lang = ctk.CTkOptionMenu(self.lang_frame, variable=self.lang_var, values=["Khmer", "English", "Chinese"], font=("Segoe UI", 14), command=self.update_voice_defaults)
+        self.lang_var = ctk.StringVar(value="Select Language...")
+        self.opt_lang = ctk.CTkOptionMenu(self.lang_frame, variable=self.lang_var, values=["Select Language...", "Khmer", "English", "Chinese"], font=("Segoe UI", 14), command=self.update_ui_visibility)
         self.opt_lang.pack(side="left", padx=5)
         
-        self.lbl_speed = ctk.CTkLabel(self.lang_frame, text="Transcription:", font=("Segoe UI", 14, "bold"))
-        self.lbl_speed.pack(side="left", padx=(20, 10))
-        self.speed_var = ctk.StringVar(value="Whisper Large (Perfect, Slow)")
-        self.opt_speed = ctk.CTkOptionMenu(self.lang_frame, variable=self.speed_var, values=["Whisper Large (Perfect, Slow)", "Whisper Medium (Great, Mod)", "Whisper Base (Okay, Fast)"], font=("Segoe UI", 14), width=180)
-        self.opt_speed.pack(side="left", padx=5)
+        self.transcriber_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.lbl_transcriber = ctk.CTkLabel(self.transcriber_frame, text="2. Transcriber:", font=("Segoe UI", 14, "bold"))
+        self.lbl_transcriber.pack(side="left", padx=10)
+        self.transcriber_var = ctk.StringVar(value="Select Transcriber...")
+        self.opt_transcriber = ctk.CTkOptionMenu(self.transcriber_frame, variable=self.transcriber_var, values=["Select Transcriber...", "Whisper Local (Free)", "Gemini AI (Premium API)", "Groq Whisper (Premium API)", "OpenAI Whisper (Premium API)"], font=("Segoe UI", 14), width=250, command=self.update_ui_visibility)
+        self.opt_transcriber.pack(side="left", padx=5)
+        
+        self.lbl_speed = ctk.CTkLabel(self.transcriber_frame, text="Speed:", font=("Segoe UI", 14, "bold"))
+        self.speed_var = ctk.StringVar(value="Whisper Medium (Great, Mod)")
+        self.opt_speed = ctk.CTkOptionMenu(self.transcriber_frame, variable=self.speed_var, values=["Whisper Medium (Great, Mod)", "Whisper Base (Okay, Fast)"], font=("Segoe UI", 14), width=180)
+        
+        self.transcriber_api_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.lbl_transcriber_key = ctk.CTkLabel(self.transcriber_api_frame, text="API Key:", font=("Segoe UI", 14, "bold"))
+        self.lbl_transcriber_key.pack(side="left", padx=10)
+        self.transcriber_key_var = ctk.StringVar(value="")
+        self.ent_transcriber_key = ctk.CTkEntry(self.transcriber_api_frame, textvariable=self.transcriber_key_var, placeholder_text="API Key...", show="*", width=250, font=("Segoe UI", 14))
+        self.ent_transcriber_key.pack(side="left", padx=5)
+        self.btn_get_groq_key = ctk.CTkButton(self.transcriber_api_frame, text="Get Free Groq Key", font=("Segoe UI", 12), width=120, fg_color="#f39c12", hover_color="#d68910", command=lambda: __import__('webbrowser').open('https://console.groq.com/keys'))
         
         self.trans_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.trans_frame.pack(pady=5, fill="x")
-        self.lbl_trans = ctk.CTkLabel(self.trans_frame, text="Translator:", font=("Segoe UI", 14, "bold"))
+        self.lbl_trans = ctk.CTkLabel(self.trans_frame, text="3. Translator:", font=("Segoe UI", 14, "bold"))
         self.lbl_trans.pack(side="left", padx=10)
-        self.trans_var = ctk.StringVar(value="Google Translate")
-        self.opt_trans = ctk.CTkOptionMenu(self.trans_frame, variable=self.trans_var, values=["Google Translate", "Gemini AI (Pro)", "DeepSeek API"], font=("Segoe UI", 14), width=160)
+        self.trans_var = ctk.StringVar(value="Select Translator...")
+        self.opt_trans = ctk.CTkOptionMenu(self.trans_frame, variable=self.trans_var, values=["Select Translator...", "Google Translate (Free)", "Gemini AI (Premium API)", "DeepSeek (Premium API)"], font=("Segoe UI", 14), width=230, command=self.update_ui_visibility)
         self.opt_trans.pack(side="left", padx=5)
         
-        self.lbl_gemini_key = ctk.CTkLabel(self.trans_frame, text="Gemini/DeepSeek Key:", font=("Segoe UI", 14, "bold"))
-        self.lbl_gemini_key.pack(side="left", padx=(10, 5))
-        self.gemini_key_var = ctk.StringVar(value="")
-        self.ent_gemini_key = ctk.CTkEntry(self.trans_frame, textvariable=self.gemini_key_var, placeholder_text="API Key...", show="*", width=150, font=("Segoe UI", 14))
-        self.ent_gemini_key.pack(side="left", padx=5)
+        self.translator_api_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.lbl_translator_key = ctk.CTkLabel(self.translator_api_frame, text="API Key:", font=("Segoe UI", 14, "bold"))
+        self.lbl_translator_key.pack(side="left", padx=10)
+        self.translator_key_var = ctk.StringVar(value="")
+        self.ent_translator_key = ctk.CTkEntry(self.translator_api_frame, textvariable=self.translator_key_var, placeholder_text="API Key...", show="*", width=250, font=("Segoe UI", 14))
+        self.ent_translator_key.pack(side="left", padx=5)
         
         self.engine_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.engine_frame.pack(pady=5, fill="x")
-        self.lbl_engine = ctk.CTkLabel(self.engine_frame, text="Engine:", font=("Segoe UI", 14, "bold"))
+        self.lbl_engine = ctk.CTkLabel(self.engine_frame, text="4. Voice Engine:", font=("Segoe UI", 14, "bold"))
         self.lbl_engine.pack(side="left", padx=10)
-        self.engine_var = ctk.StringVar(value="Edge-TTS")
-        self.opt_engine = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["Edge-TTS", "KiriTTS"], font=("Segoe UI", 14), command=self.update_voice_defaults)
+        self.engine_var = ctk.StringVar(value="Select Engine...")
+        self.opt_engine = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["Select Engine...", "Edge-TTS", "KiriTTS"], font=("Segoe UI", 14), command=self.update_ui_visibility)
         self.opt_engine.pack(side="left", padx=5)
         
-        self.lbl_transcriber = ctk.CTkLabel(self.engine_frame, text="Transcriber:", font=("Segoe UI", 14, "bold"))
-        self.lbl_transcriber.pack(side="left", padx=(15, 5))
-        self.transcriber_var = ctk.StringVar(value="Whisper (Local)")
-        self.opt_transcriber = ctk.CTkOptionMenu(self.engine_frame, variable=self.transcriber_var, values=["Whisper (Local)", "Gemini AI (Pro)"], font=("Segoe UI", 14), width=140)
-        self.opt_transcriber.pack(side="left", padx=5)
-
-        self.lbl_voice_speed = ctk.CTkLabel(self.engine_frame, text="Voice Speed:", font=("Segoe UI", 14, "bold"))
-        self.lbl_voice_speed.pack(side="left", padx=(15, 5))
+        self.lbl_voice_speed = ctk.CTkLabel(self.engine_frame, text="Speed:", font=("Segoe UI", 14, "bold"))
         self.voice_speed_var = ctk.StringVar(value="1.0x")
         self.opt_voice_speed = ctk.CTkOptionMenu(self.engine_frame, variable=self.voice_speed_var, values=["1.0x", "1.25x", "1.5x", "1.75x", "2.0x"], font=("Segoe UI", 14), width=80)
-        self.opt_voice_speed.pack(side="left", padx=5)
         
         self.lbl_key = ctk.CTkLabel(self.engine_frame, text="KiriTTS Key:", font=("Segoe UI", 14, "bold"))
-        self.lbl_key.pack(side="left", padx=(20, 10))
         self.api_key_var = ctk.StringVar(value="")
-        self.ent_key = ctk.CTkEntry(self.engine_frame, textvariable=self.api_key_var, placeholder_text="sk-...", show="*", width=200, font=("Segoe UI", 14))
-        self.ent_key.pack(side="left", padx=5)
-        
+        self.ent_key = ctk.CTkEntry(self.engine_frame, textvariable=self.api_key_var, placeholder_text="sk-...", show="*", width=150, font=("Segoe UI", 14))
+        self.api_key_var.trace_add("write", lambda *args: self.fetch_kiritts_voices() if self.engine_var.get() == "KiriTTS" else None)
+
+        # Profile name for saving / loading API keys
+        self.profile_name_var = ctk.StringVar(value="default")
+        self.lbl_profile = ctk.CTkLabel(self.engine_frame, text="Profile:", font=("Segoe UI", 14, "bold"))
+        self.ent_profile = ctk.CTkEntry(self.engine_frame, textvariable=self.profile_name_var, placeholder_text="Profile name", width=120, font=("Segoe UI", 14))
+        self.btn_save_keys = ctk.CTkButton(self.engine_frame, text="💾 Save Keys", command=self.save_api_keys, font=("Segoe UI", 12), width=110, fg_color="#28a745", hover_color="#218838")
+
         self.voice_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.voice_frame.pack(pady=5, fill="x")
-        
-        self.lbl_male = ctk.CTkLabel(self.voice_frame, text="Male Model:", font=("Segoe UI", 14, "bold"))
+        self.lbl_male = ctk.CTkLabel(self.voice_frame, text="Male Voice:", font=("Segoe UI", 14, "bold"))
         self.lbl_male.pack(side="left", padx=10)
-        self.voice_male_var = ctk.StringVar(value="km-KH-PisethNeural")
-        self.ent_male = ctk.CTkEntry(self.voice_frame, textvariable=self.voice_male_var, width=160, font=("Segoe UI", 14))
+        self.voice_male_var = ctk.StringVar(value="Auto Detect")
+        self.ent_male = ctk.CTkComboBox(self.voice_frame, variable=self.voice_male_var, width=160, font=("Segoe UI", 14), values=["Auto Detect"])
         self.ent_male.pack(side="left", padx=5)
-        
-        self.lbl_female = ctk.CTkLabel(self.voice_frame, text="Female Model:", font=("Segoe UI", 14, "bold"))
+        self.lbl_female = ctk.CTkLabel(self.voice_frame, text="Female Voice:", font=("Segoe UI", 14, "bold"))
         self.lbl_female.pack(side="left", padx=(15, 5))
-        self.voice_female_var = ctk.StringVar(value="km-KH-SreymomNeural")
-        self.ent_female = ctk.CTkEntry(self.voice_frame, textvariable=self.voice_female_var, width=160, font=("Segoe UI", 14))
+        self.voice_female_var = ctk.StringVar(value="Auto Detect")
+        self.ent_female = ctk.CTkComboBox(self.voice_frame, variable=self.voice_female_var, width=160, font=("Segoe UI", 14), values=["Auto Detect"])
         self.ent_female.pack(side="left", padx=5)
+        # Dub gender override
+        self.lbl_dub_gender = ctk.CTkLabel(self.voice_frame, text="Dub As:", font=("Segoe UI", 14, "bold"))
+        self.lbl_dub_gender.pack(side="left", padx=(15, 5))
+        self.dub_gender_var = ctk.StringVar(value="Auto Detect")
+        self.opt_dub_gender = ctk.CTkOptionMenu(self.voice_frame, variable=self.dub_gender_var,
+                                                values=["Auto Detect", "Male Only", "Female Only"],
+                                                font=("Segoe UI", 14), width=130)
+        self.opt_dub_gender.pack(side="left", padx=5)
         
+        self.chk_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.chk_mirror_var = ctk.StringVar(value="off")
         self.chk_blur_var = ctk.StringVar(value="off")
         self.chk_emotion_var = ctk.StringVar(value="on")
         self.chk_vocals_var = ctk.StringVar(value="off")
         self.chk_story_var = ctk.StringVar(value="off")
         
-        self.chk_story = ctk.CTkCheckBox(self.main_frame, text="Enable Storytelling Mode (Narrates entire video with 1 voice)", variable=self.chk_story_var, onvalue="on", offvalue="off", fg_color="#ffc107", hover_color="#e0a800")
-        self.chk_story.pack(pady=10)
-        
-        self.chk_vocals = ctk.CTkCheckBox(self.main_frame, text="Remove Original Vocals (Keep BGM/SFX)", variable=self.chk_vocals_var, onvalue="on", offvalue="off")
-        self.chk_vocals.pack(pady=10)
-        
-        self.chk_mirror = ctk.CTkCheckBox(self.main_frame, text="Mirror Video (Avoid Copyright)", variable=self.chk_mirror_var, onvalue="on", offvalue="off")
-        self.chk_mirror.pack(pady=15)
-        
-        self.chk_blur = ctk.CTkCheckBox(self.main_frame, text="Hide Watermarks (Cinematic Bars)", variable=self.chk_blur_var, onvalue="on", offvalue="off")
-        self.chk_blur.pack(pady=10)
+        self.chk_story = ctk.CTkCheckBox(self.chk_frame, text="Enable Storytelling Mode", variable=self.chk_story_var, onvalue="on", offvalue="off", fg_color="#ffc107", hover_color="#e0a800")
+        self.chk_story.pack(side="left", padx=10)
+        self.chk_vocals = ctk.CTkCheckBox(self.chk_frame, text="Remove Vocals", variable=self.chk_vocals_var, onvalue="on", offvalue="off")
+        self.chk_vocals.pack(side="left", padx=10)
+        self.chk_mirror = ctk.CTkCheckBox(self.chk_frame, text="Mirror Video", variable=self.chk_mirror_var, onvalue="on", offvalue="off")
+        self.chk_mirror.pack(side="left", padx=10)
+        self.chk_blur = ctk.CTkCheckBox(self.chk_frame, text="Hide Watermarks", variable=self.chk_blur_var, onvalue="on", offvalue="off")
+        self.chk_blur.pack(side="left", padx=10)
+
         
         self.btn_start = ctk.CTkButton(self.main_frame, text="Start Dubbing", command=self.start_dubbing, font=("Segoe UI", 18, "bold"), fg_color="#28a745", hover_color="#218838", height=45)
         self.btn_start.pack(pady=25)
         
-        self.progress_bar = ctk.CTkProgressBar(self.main_frame, width=500)
-        self.progress_bar.set(0)
+        self.progress_bar = ctk.CTkProgressBar(self.main_frame, width=500, height=20)
         self.progress_bar.pack(pady=10)
+        self.progress_bar.set(0)
         
         self.lbl_status = ctk.CTkLabel(self.main_frame, text="Ready", font=("Segoe UI", 14), text_color="#17a2b8")
         self.lbl_status.pack(pady=10)
+        
+        # Initialize dynamic visibility
+        self._load_api_keys()
+        self.update_ui_visibility()
+        self.update_ui_language()
         
     def select_video(self):
         path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.mov *.avi *.mkv")])
@@ -1273,6 +1499,7 @@ class KhmerDubApp(ctk.CTk):
                 ydl_opts = {
                     'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                     'outtmpl': os.path.join(TEMP_DIR, 'downloaded_%(id)s.%(ext)s'),
+                    'ffmpeg_location': FFMPEG_CMD,
                     'progress_hooks': [progress_hook],
                     'quiet': True,
                     'no_warnings': True,
@@ -1317,7 +1544,103 @@ class KhmerDubApp(ctk.CTk):
                 self.after(0, on_error)
                 
         threading.Thread(target=download_thread, daemon=True).start()
+
+    def _load_api_keys(self):
+        """Load saved API keys from disk and populate UI fields (uses 'default' profile)."""
+        if not os.path.exists(API_KEYS_PATH):
+            return
+        try:
+            with open(API_KEYS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            profile = self.profile_name_var.get().strip() or "default"
+            profile_data = data.get(profile, {})
+            self.api_key_var.set(profile_data.get("kiritts_key", ""))
+            self.transcriber_key_var.set(profile_data.get("transcriber_key", ""))
+            self.translator_key_var.set(profile_data.get("translator_key", ""))
+        except Exception as e:
+            debug_log(f"[Load API Keys] Failed: {e}")
+
+    def update_ui_language(self, choice=None):
+        lang = self.ui_lang_var.get()
+        t = UI_TEXT.get(lang, UI_TEXT["en"])
+        font = "Battambang" if lang == "km" else "Segoe UI"
+        
+        self.title(t["title"])
+        self.lbl_title.configure(text=t["title"], font=(font, 24, "bold"))
+        self.btn_select.configure(text=t["select_local"], font=(font, 14))
+        self.url_entry.configure(placeholder_text=t["url_placeholder"], font=(font, 12))
+        if "Downloading" not in self.btn_download.cget("text"):
+            self.btn_download.configure(text=t["download"], font=(font, 14))
             
+        self.lbl_lang.configure(text=t["lbl_lang"], font=(font, 14, "bold"))
+        self.lbl_transcriber.configure(text=t["lbl_transcriber"], font=(font, 14, "bold"))
+        self.lbl_speed.configure(text=t["lbl_speed"], font=(font, 14, "bold"))
+        self.lbl_transcriber_key.configure(text=t["lbl_transcriber_key"], font=(font, 14, "bold"))
+        self.ent_transcriber_key.configure(placeholder_text=t["ent_transcriber_key"], font=(font, 14))
+        self.btn_get_groq_key.configure(text=t["get_groq_key"], font=(font, 12))
+        
+        self.lbl_trans.configure(text=t["lbl_trans"], font=(font, 14, "bold"))
+        self.lbl_translator_key.configure(text=t["lbl_translator_key"], font=(font, 14, "bold"))
+        self.ent_translator_key.configure(placeholder_text=t["ent_translator_key"], font=(font, 14))
+        
+        self.lbl_engine.configure(text=t["lbl_engine"], font=(font, 14, "bold"))
+        self.lbl_voice_speed.configure(text=t["lbl_voice_speed"], font=(font, 14, "bold"))
+        self.lbl_key.configure(text=t["lbl_key"], font=(font, 14, "bold"))
+        self.ent_key.configure(placeholder_text=t["ent_key"], font=(font, 14))
+        self.lbl_profile.configure(text=t["lbl_profile"], font=(font, 14, "bold"))
+        self.ent_profile.configure(placeholder_text=t["ent_profile"], font=(font, 14))
+        self.btn_save_keys.configure(text=t["save_keys"], font=(font, 12))
+        
+        self.lbl_male.configure(text=t["lbl_male"], font=(font, 14, "bold"))
+        self.lbl_female.configure(text=t["lbl_female"], font=(font, 14, "bold"))
+        self.lbl_dub_gender.configure(text=t["lbl_dub_gender"], font=(font, 14, "bold"))
+        
+        self.chk_story.configure(text=t["chk_story"], font=(font, 12))
+        self.chk_vocals.configure(text=t["chk_vocals"], font=(font, 12))
+        self.chk_mirror.configure(text=t["chk_mirror"], font=(font, 12))
+        self.chk_blur.configure(text=t["chk_blur"], font=(font, 12))
+        
+        if self.btn_start.cget("state") == "normal":
+            self.btn_start.configure(text=t["start_dubbing"])
+        self.btn_start.configure(font=(font, 18, "bold"))
+        
+        self.lbl_ui_lang.configure(text=t["ui_lang"], font=(font, 12))
+        
+        # Make dropdown fonts match language
+        self.opt_lang.configure(font=(font, 14))
+        self.opt_transcriber.configure(font=(font, 14))
+        self.opt_speed.configure(font=(font, 14))
+        self.opt_trans.configure(font=(font, 14))
+        self.opt_engine.configure(font=(font, 14))
+        self.opt_voice_speed.configure(font=(font, 14))
+        self.ent_male.configure(font=(font, 14))
+        self.ent_female.configure(font=(font, 14))
+        self.opt_dub_gender.configure(font=(font, 14))
+
+    def save_api_keys(self):
+        """Save current API keys under the given profile name to api_keys.json."""
+        profile = self.profile_name_var.get().strip() or "default"
+        entry = {
+            "kiritts_key": self.api_key_var.get().strip(),
+            "transcriber_key": self.transcriber_key_var.get().strip(),
+            "translator_key": self.translator_key_var.get().strip(),
+        }
+        data = {}
+        if os.path.exists(API_KEYS_PATH):
+            try:
+                with open(API_KEYS_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        data[profile] = entry
+        try:
+            with open(API_KEYS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Saved", f"API keys saved under profile '{profile}'.")
+        except Exception as e:
+            debug_log(f"[Save API Keys] Failed: {e}")
+            messagebox.showerror("Error", f"Failed to save API keys:\n{e}")
+
     def update_status(self, kw):
         if 'progress' in kw:
             self.progress_bar.set(kw['progress'] / 100.0)
@@ -1334,22 +1657,158 @@ class KhmerDubApp(ctk.CTk):
             self.btn_start.configure(state="normal", text="Start Dubbing")
             messagebox.showerror("Error", kw.get('message'))
 
+    def update_ui_visibility(self, choice=None):
+        lang = self.lang_var.get()
+        transcriber = self.transcriber_var.get()
+        translator = self.trans_var.get()
+        engine = self.engine_var.get()
+
+        if "Select" not in lang and choice is not None:
+            self.update_voice_defaults()
+
+        # Hide all cascade frames
+        self.transcriber_frame.pack_forget()
+        self.transcriber_api_frame.pack_forget()
+        self.trans_frame.pack_forget()
+        self.translator_api_frame.pack_forget()
+        self.engine_frame.pack_forget()
+        self.voice_frame.pack_forget()
+        self.chk_frame.pack_forget()
+        self.btn_start.pack_forget()
+        
+        # Step 1: Language -> Transcriber
+        if "Select" not in lang:
+            self.transcriber_frame.pack(pady=5, fill="x")
+            
+            # Step 2: Transcriber -> Transcriber API + Translator
+            if "Select" not in transcriber:
+                if "Free" in transcriber:
+                    self.lbl_speed.pack(side="left", padx=(20, 10))
+                    self.opt_speed.pack(side="left", padx=5)
+                else:
+                    self.lbl_speed.pack_forget()
+                    self.opt_speed.pack_forget()
+                    self.transcriber_api_frame.pack(pady=5, fill="x")
+                    if "Groq" in transcriber:
+                        self.lbl_transcriber_key.configure(text="Groq API Key:")
+                        self.ent_transcriber_key.configure(placeholder_text="gsk_...")
+                        self.btn_get_groq_key.pack(side="left", padx=5)
+                    elif "OpenAI" in transcriber:
+                        self.lbl_transcriber_key.configure(text="OpenAI API Key:")
+                        self.ent_transcriber_key.configure(placeholder_text="sk-proj...")
+                        self.btn_get_groq_key.pack_forget()
+                    elif "Gemini" in transcriber:
+                        self.lbl_transcriber_key.configure(text="Gemini API Key:")
+                        self.ent_transcriber_key.configure(placeholder_text="AIzaSy...")
+                        self.btn_get_groq_key.pack_forget()
+                    
+                self.trans_frame.pack(pady=5, fill="x")
+                
+                # Step 3: Translator -> Translator API + Engine
+                if "Select" not in translator:
+                    if "Premium" in translator:
+                        self.translator_api_frame.pack(pady=5, fill="x")
+                        if "DeepSeek" in translator:
+                            self.lbl_translator_key.configure(text="DeepSeek API Key:")
+                            self.ent_translator_key.configure(placeholder_text="sk-...")
+                        elif "Gemini" in translator:
+                            self.lbl_translator_key.configure(text="Gemini API Key:")
+                            self.ent_translator_key.configure(placeholder_text="AIzaSy...")
+                            
+                    self.engine_frame.pack(pady=5, fill="x")
+                    
+                    # Step 4: Engine -> Start
+                    if "Select" not in engine:
+                        self.lbl_voice_speed.pack(side="left", padx=(15, 5))
+                        self.opt_voice_speed.pack(side="left", padx=5)
+                        if engine == "KiriTTS":
+                            self.opt_voice_speed.configure(state="normal")
+                        else:
+                            self.opt_voice_speed.configure(state="normal")
+                        if engine == "KiriTTS":
+                            self.lbl_key.pack(side="left", padx=(20, 10))
+                            self.ent_key.pack(side="left", padx=5)
+                            self.lbl_profile.pack(side="left", padx=(15, 5))
+                            self.ent_profile.pack(side="left", padx=5)
+                            self.btn_save_keys.pack(side="left", padx=5)
+                            self.voice_frame.pack(pady=5, fill="x")
+                        else:
+                            self.lbl_key.pack_forget()
+                            self.ent_key.pack_forget()
+                            self.lbl_profile.pack_forget()
+                            self.ent_profile.pack_forget()
+                            self.btn_save_keys.pack_forget()
+                            self.voice_frame.pack_forget()
+                            
+                        self.chk_frame.pack(pady=15, fill="x")
+                        self.btn_start.pack(pady=25)
+                        
+        self.progress_bar.pack_forget()
+        self.lbl_status.pack_forget()
+        self.progress_bar.pack(pady=10)
+        self.lbl_status.pack(pady=10)
+
     def update_voice_defaults(self, choice=None):
         engine = self.engine_var.get()
         lang = self.lang_var.get()
         if engine == "KiriTTS":
-            self.voice_male_var.set("Rithy")
-            self.voice_female_var.set("Maly")
+            self.voice_male_var.set("Auto Detect")
+            self.voice_female_var.set("Auto Detect")
+            self.ent_male.configure(values=["Auto Detect"] + KIRI_MALE_VOICES)
+            self.ent_female.configure(values=["Auto Detect"] + KIRI_FEMALE_VOICES)
+            self.fetch_kiritts_voices()
         else:
             if lang == "Khmer":
                 self.voice_male_var.set("km-KH-PisethNeural")
                 self.voice_female_var.set("km-KH-SreymomNeural")
+                self.ent_male.configure(values=["km-KH-PisethNeural"])
+                self.ent_female.configure(values=["km-KH-SreymomNeural"])
             elif lang == "English":
                 self.voice_male_var.set("en-US-GuyNeural")
                 self.voice_female_var.set("en-US-AriaNeural")
+                self.ent_male.configure(values=["en-US-GuyNeural"])
+                self.ent_female.configure(values=["en-US-AriaNeural"])
             elif lang == "Chinese":
                 self.voice_male_var.set("zh-CN-YunxiNeural")
                 self.voice_female_var.set("zh-CN-XiaoxiaoNeural")
+                self.ent_male.configure(values=["zh-CN-YunxiNeural"])
+                self.ent_female.configure(values=["zh-CN-XiaoxiaoNeural"])
+                
+    def fetch_kiritts_voices(self):
+        api_key = self.api_key_var.get().strip()
+        if not api_key:
+            return
+        def fetch_thread():
+            import requests
+            global KIRI_MALE_VOICES, KIRI_FEMALE_VOICES
+            try:
+                headers = {'Authorization': f'Bearer {api_key}'}
+                res = requests.get('https://api.kiritts.com/v1/voices', headers=headers, timeout=10)
+                if res.status_code == 200:
+                    data = res.json().get('data', [])
+                    debug_log(f"[KiriTTS Voices] Raw API response: {data}")
+                    males = [v['name'] for v in data if v.get('gender') == 'male']
+                    females = [v['name'] for v in data if v.get('gender') == 'female']
+                    # Include cloned/custom voices in the male list
+                    # (API may return gender='clone', 'custom', None, or missing for user-created voices)
+                    clones = [v['name'] for v in data
+                              if v.get('gender') not in ('male', 'female') and v.get('name')]
+                    if clones:
+                        debug_log(f"[KiriTTS Voices] Found clone/custom voices: {clones}")
+                        males = males + [f"{n} (Clone)" if not n.endswith('(Clone)') else n for n in clones]
+                    if males:
+                        KIRI_MALE_VOICES = males
+                    if females:
+                        KIRI_FEMALE_VOICES = females
+
+                    self.after(0, lambda: self.ent_male.configure(values=["Auto Detect"] + KIRI_MALE_VOICES))
+                    self.after(0, lambda: self.ent_female.configure(values=["Auto Detect"] + KIRI_FEMALE_VOICES))
+                else:
+                    debug_log(f"[KiriTTS Voices] API error {res.status_code}: {res.text}")
+            except Exception as e:
+                debug_log(f"[fetch_kiritts_voices] Failed to fetch voices: {e}")
+                
+        threading.Thread(target=fetch_thread, daemon=True).start()
             
     def start_dubbing(self):
         if not self.video_path:
@@ -1372,10 +1831,12 @@ class KhmerDubApp(ctk.CTk):
             'voice_speed': self.voice_speed_var.get(),
             'tts_engine': self.engine_var.get(),
             'kiritts_key': self.api_key_var.get(),
-            'gemini_key': self.gemini_key_var.get(),
+            'transcriber_key': self.transcriber_key_var.get().strip(),
+            'translator_key': self.translator_key_var.get().strip(),
             'voice_male': self.voice_male_var.get(),
             'voice_female': self.voice_female_var.get(),
-            'story_mode': self.chk_story_var.get() == "on"
+            'story_mode': self.chk_story_var.get() == "on",
+            'dub_gender': self.dub_gender_var.get()  # 'Auto Detect', 'Male Only', or 'Female Only'
         }
         
         def run_with_error_catch():
