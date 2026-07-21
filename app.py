@@ -1822,18 +1822,31 @@ class KhmerDubApp(ctk.CTk):
                     'subtitlesformat': 'vtt/srt/best'
                 }
                 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if 'requested_downloads' in info and len(info['requested_downloads']) > 0:
-                        filepath = info['requested_downloads'][0].get('filepath') or ydl.prepare_filename(info)
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "429" in err_msg or "too many requests" in err_msg or "subtitles" in err_msg:
+                        print(f"Subtitle download failed ({e}). Retrying without subtitles...")
+                        ydl_opts['writesubtitles'] = False
+                        ydl_opts['writeautomaticsub'] = False
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(url, download=True)
                     else:
-                        filepath = ydl.prepare_filename(info)
-                    if not os.path.exists(filepath):
-                        base = os.path.splitext(filepath)[0]
-                        import glob
-                        matches = glob.glob(base + ".*")
-                        if matches:
-                            filepath = matches[0]
+                        raise e
+
+                if 'requested_downloads' in info and len(info['requested_downloads']) > 0:
+                    filepath = info['requested_downloads'][0].get('filepath') or ydl.prepare_filename(info)
+                else:
+                    filepath = ydl.prepare_filename(info)
+                
+                if not os.path.exists(filepath):
+                    base = os.path.splitext(filepath)[0]
+                    import glob
+                    matches = glob.glob(base + ".*")
+                    if matches:
+                        filepath = matches[0]
                     
                 def on_success():
                     self.video_path = filepath
