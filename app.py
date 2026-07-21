@@ -49,7 +49,7 @@ FFMPEG_CMD = get_bin_path('ffmpeg.exe' if os.name == 'nt' else 'ffmpeg')
 FFPROBE_CMD = get_bin_path('ffprobe.exe' if os.name == 'nt' else 'ffprobe')
 import cv2
 from PIL import Image
-import google.generativeai as genai
+from google import genai
 
 # ── Runtime directories ───────────
 _BASE      = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -186,9 +186,10 @@ def detect_segment_gender(audio_path: str, start_sec: float, end_sec: float, vid
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(frame_rgb)
                 
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-2.5-flash')
-                response = model.generate_content([
+                client = genai.Client(api_key=api_key)
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[
                     "Identify the gender of the primary person speaking or the most prominent character in this image. Reply with exactly one word: 'male' or 'female'. If you cannot tell, reply 'unknown'.",
                     img
                 ])
@@ -358,19 +359,100 @@ def get_video_duration(video_path: str) -> float:
     return float(result.stdout.strip())
 
 
+def parse_subtitle_file(filepath):
+    """Parse a VTT or SRT file into a list of segments with exact timing."""
+    segments = []
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        import re
+        # Normalize newlines
+        content = content.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Split into blocks (separated by multiple newlines)
+        blocks = re.split(r'\n{2,}', content.strip())
+        
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if not lines:
+                continue
+            
+            # Find the line with the timestamp
+            ts_line = -1
+            for i, line in enumerate(lines):
+                if '-->' in line:
+                    ts_line = i
+                    break
+                    
+            if ts_line == -1:
+                continue
+                
+            ts_match = re.search(r'(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})', lines[ts_line])
+            if not ts_match:
+                continue
+                
+            def time_to_sec(t_str):
+                t_str = t_str.replace(',', '.')
+                h, m, s = t_str.split(':')
+                return int(h) * 3600 + int(m) * 60 + float(s)
+                
+            start = time_to_sec(ts_match.group(1))
+            end = time_to_sec(ts_match.group(2))
+            
+            # Text is everything after the timestamp line
+            text_lines = lines[ts_line+1:]
+            text = ' '.join(text_lines)
+            
+            # Clean text (remove VTT tags, HTML tags)
+            text = re.sub(r'<[^>]+>', '', text).strip()
+            
+            if text and not text.isdigit():
+                segments.append({'start': start, 'end': end, 'text': text})
+                
+        return segments
+    except Exception as e:
+        print(f'[Subtitle Parse Error] {e}')
+        return []
+
 # ─────────────────────────────────────────────────────────────
 #  AUDIO SPEED ADJUST  (pydub frame-rate trick)
 # ─────────────────────────────────────────────────────────────
 def speed_change(sound: AudioSegment, speed: float) -> AudioSegment:
     """
-    Change playback speed without pitch shift.
-    Works best in range 0.5x – 2.5x.
+    Change playback speed WITHOUT pitch shift using ffmpeg atempo filter.
     """
-    altered = sound._spawn(
-        sound.raw_data,
-        overrides={"frame_rate": int(sound.frame_rate * speed)}
-    )
-    return altered.set_frame_rate(sound.frame_rate)
+    if abs(speed - 1.0) < 0.01:
+        return sound
+        
+    import tempfile
+    import subprocess
+    import os
+    
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_in:
+        in_path = f_in.name
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_out:
+        out_path = f_out.name
+        
+    try:
+        sound.export(in_path, format="wav")
+        # Run ffmpeg with atempo to stretch/compress time while preserving pitch
+        subprocess.run([
+            FFMPEG_CMD, '-y', '-i', in_path, 
+            '-filter:a', f'atempo={speed}', 
+            out_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        altered = AudioSegment.from_file(out_path, format="wav")
+        return altered
+    except Exception as e:
+        print(f"Error in speed_change: {e}")
+        return sound
+    finally:
+        try: os.remove(in_path)
+        except: pass
+        try: os.remove(out_path)
+        except: pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -458,7 +540,7 @@ def generate_segment_tts(text: str, voice_id: str, out_path: str, options: dict 
 # ─────────────────────────────────────────────────────────────
 def build_timed_audio(
     segments: list,
-    audio_path: str,
+    bg_audio_path: str,
     video_duration: float,
     job_id: str,
     progress_callback=None,
@@ -469,7 +551,8 @@ def build_timed_audio(
     genders: list = None,
     kiri_voices: list = None,
     video_path: str = None,
-    sequential_mode: bool = False
+    sequential_mode: bool = False,
+    is_vocals_removed: bool = False
 ) -> str:
     """
     Fast parallel version:
@@ -535,7 +618,9 @@ def build_timed_audio(
             return i, None
         gender = genders[i] or 'male'
         # KiriTTS: use clustered voice; Edge-TTS: use gender-based voice
-        if kiri_voices is not None:
+        if gender == 'narrator':
+            voice_id = voice_male  # Use male voice for narrator
+        elif kiri_voices is not None:
             voice_id = kiri_voices[i]  # KiriTTS voice name e.g. 'Chanda'
         else:
             voice_id = voice_male if gender == 'male' else voice_female
@@ -587,6 +672,22 @@ def build_timed_audio(
                 elif text.endswith('...') or text.endswith('…'):
                     clip = clip - 2
                     clip = speed_change(clip, 0.85)
+                    
+            if seg.get('gender') == 'narrator':
+                # Slightly speed up narrator and increase volume so they sound distinct
+                clip = speed_change(clip, 1.15)
+                clip = clip + 2
+
+            if options and options.get('auto_sync', True) and not sequential_mode and seg.get('end', 0) > 0:
+                target_len = int((seg['end'] - seg['start']) * 1000)
+                if target_len > 0:
+                    current_len = len(clip)
+                    speed_factor = current_len / target_len
+                    # Only speed up if it's too long, NEVER slow down (to avoid drunk voices)
+                    # Clamp speed up to 1.5x max to avoid chipmunk voices.
+                    speed_factor = max(1.0, min(speed_factor, 1.5))
+                    if abs(speed_factor - 1.0) > 0.05:
+                        clip = speed_change(clip, speed_factor)
 
             clip_len  = len(clip)
             if sequential_mode:
@@ -600,10 +701,11 @@ def build_timed_audio(
             if sequential_mode:
                 curr_time = end_ms + 800  # 800ms pause between sentences
             
-            # Completely silence the original audio during dubbed segments
-            # (replaces old -15dB duck which still let the original voice bleed through)
-            silence = AudioSegment.silent(duration=end_ms - start_ms)
-            bg_layer = bg_layer[:start_ms] + silence + bg_layer[end_ms:]
+            # Duck the original audio slightly during dubbed segments so the voice stands out
+            # If vocals were removed, we keep the music and effects at full volume!
+            if not is_vocals_removed:
+                ducked = bg_layer[start_ms:end_ms] - 6  # Reduce volume by 6dB
+                bg_layer = bg_layer[:start_ms] + ducked + bg_layer[end_ms:]
             
             # Overlay speech on the separate speech layer
             speech_layer = speech_layer.overlay(clip, position=start_ms)
@@ -642,13 +744,18 @@ def seconds_to_srt(s: float) -> str:
     return f'{h:02d}:{m:02d}:{sec:02d},{ms:03d}'
 
 
+import textwrap
+
 def write_srt(segments, path: str):
     with open(path, 'w', encoding='utf-8') as f:
         for i, seg in enumerate(segments, 1):
+            text = seg['text'].strip()
+            # Wrap Khmer text every 35 chars so it fits on vertical video screens
+            wrapped_text = textwrap.fill(text, width=35, break_long_words=True)
             f.write(
                 f"{i}\n"
                 f"{seconds_to_srt(seg['start'])} --> {seconds_to_srt(seg['end'])}\n"
-                f"{seg['text'].strip()}\n\n"
+                f"{wrapped_text}\n\n"
             )
 
 
@@ -699,8 +806,8 @@ def robust_translate_batch(texts: list, dest='km', retries=5) -> list:
 def gemini_translate_batch(texts: list, human_dest='Khmer', dest_code='km', api_key='', video_file=None, retries=3) -> list:
     """Translate using Gemini Pro for perfect conversational context and add speaker tags/visual context."""
     if not texts: return []
-    import google.generativeai as genai
-    genai.configure(api_key=api_key)
+    from google import genai
+    client = genai.Client(api_key=api_key)
     
     # Combine texts into a single prompt for contextual translation
     text_block = "\n".join(texts)
@@ -720,11 +827,9 @@ Keep the exact same number of lines as the original script. Do not add any extra
 """
     for attempt in range(retries):
         try:
-            model = genai.GenerativeModel('gemini-2.5-pro')
-            
             # Pass video file if available
             contents = [video_file, prompt] if video_file else [prompt]
-            response = model.generate_content(contents)
+            response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
             
             translated = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
             
@@ -796,28 +901,30 @@ Script:
 
 def gemini_transcribe_video(video_path: str, api_key: str, human_dest: str, upd_callback=None, job_id=None) -> list:
     """Directly transcribe and translate video to JSON using Gemini 1.5 Pro."""
-    import google.generativeai as genai
+    from google import genai
     import json
     import time
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     
     if upd_callback: upd_callback(job_id, message='☁️ Uploading video directly to Gemini…')
-    video_file = genai.upload_file(path=video_path)
+    video_file = client.files.upload(file=video_path)
     
     if upd_callback: upd_callback(job_id, message='⏳ Waiting for Gemini to process video…')
     while video_file.state.name == 'PROCESSING':
+        if app_gui and hasattr(app_gui, 'cancel_event') and app_gui.cancel_event.is_set():
+            raise Exception("Process stopped by user")
         time.sleep(2)
-        video_file = genai.get_file(video_file.name)
+        video_file = client.files.get(name=video_file.name)
         
     if upd_callback: upd_callback(job_id, message='🧠 Gemini is native-transcribing and translating…')
     
     prompt = f"""You are a professional movie subtitle transcriber and translator.
-Watch the provided video and transcribe every spoken word.
-Translate all dialogue perfectly into {human_dest}.
-Output your response as a RAW JSON array of objects (do NOT wrap it in markdown block like ```json).
+Watch the provided video carefully. If there are on-screen captions/subtitles in the video, you MUST use the EXACT moment they appear and disappear as your `start` and `end` timestamps. This guarantees perfect lip sync.
+CRITICAL INSTRUCTION: You MUST translate all dialogue perfectly into {human_dest}. The "text" field MUST be written in {human_dest}. Do NOT output the original English speech.
+Output your response as a RAW JSON array of objects.
 Each object must have the following keys:
-- "start": start time in seconds (float)
-- "end": end time in seconds (float)
+- "start": exact start time in seconds (float) when the caption appears or actor starts speaking
+- "end": exact end time in seconds (float) when the caption disappears or actor stops speaking
 - "text": the translated text
 - "gender": "male" or "female" based on the speaker's voice
 - "speaker_identity": visual context and identity (e.g. "Boy in truck")
@@ -829,8 +936,12 @@ Example output:
 ]
 """
     try:
-        model = genai.GenerativeModel('gemini-pro-latest')
-        response = model.generate_content([video_file, prompt])
+        from google import genai
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=[video_file, prompt],
+            config=genai.types.GenerateContentConfig(response_mime_type="application/json")
+        )
         
         raw_text = response.text.strip()
         start_idx = raw_text.find('[')
@@ -840,14 +951,38 @@ Example output:
             json_str = raw_text[start_idx:end_idx+1]
         else:
             json_str = raw_text
-            
-        segments = json.loads(json_str)
+        
+        try:
+            segments = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Try to repair common JSON issues
+            import re
+            repaired = json_str
+            # Remove trailing commas before ] or }
+            repaired = re.sub(r',\s*\]', ']', repaired)
+            repaired = re.sub(r',\s*\}', '}', repaired)
+            # If array is truncated (missing closing bracket), try to close it
+            if repaired.count('[') > repaired.count(']'):
+                # Find last complete object (ending with })
+                last_brace = repaired.rfind('}')
+                if last_brace != -1:
+                    repaired = repaired[:last_brace+1] + ']'
+            try:
+                segments = json.loads(repaired)
+            except json.JSONDecodeError as e2:
+                print(f"Failed to parse Gemini JSON even after repair: {e2}")
+                print(f"Raw text (first 500 chars): {raw_text[:500]}")
+                try: client.files.delete(name=video_file.name)
+                except: pass
+                raise Exception(f"Gemini returned invalid JSON. Please try again.")
     except Exception as e:
         print(f"Failed to parse Gemini JSON: {e}")
-        segments = []
+        try: client.files.delete(name=video_file.name)
+        except: pass
+        raise Exception(f"Gemini API Error: {str(e)}")
         
     try:
-        genai.delete_file(video_file.name)
+        client.files.delete(name=video_file.name)
     except: pass
         
     return segments
@@ -856,6 +991,10 @@ Example output:
 # ─────────────────────────────────────────────────────────────
 #  MAIN PIPELINE
 # ─────────────────────────────────────────────────────────────
+def check_cancel():
+    if app_gui and hasattr(app_gui, 'cancel_event') and app_gui.cancel_event.is_set():
+        raise Exception("Process stopped by user")
+
 def process_video(job_id: str, video_path: str, options: dict):
     debug_log(f"--- process_video started for job {job_id} ---")
     debug_log(f"video_path: {video_path}")
@@ -877,24 +1016,59 @@ def process_video(job_id: str, video_path: str, options: dict):
         translator_key = options.get('translator_key', '').strip()
         translator_engine = options.get('translator', 'Google Translate (Free)')
         
+        # ── 0. Extract audio & Vocal Removal (FOR ALL PIPELINES) ──
+        upd(job_id, stage='extract', progress=5, message='🎵 Extracting audio from video…')
+        subprocess.run(
+            [FFMPEG_CMD, '-i', video_path,
+             '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+             audio_path, '-y'],
+            check=True, capture_output=True
+        )
+        bg_audio_path = audio_path
+        original_audio_path = audio_path
+
+        if options.get('remove_vocals'):
+            upd(job_id, stage='isolate', progress=12, message='🎶 AI Vocal Removal: Isolating background music (this may take a minute)…')
+            subprocess.run([
+                'demucs', '-n', 'htdemucs', '--two-stems', 'vocals', 
+                '-o', TEMP_DIR, '-d', 'cpu', audio_path
+            ], check=True)
+            
+            base_name = os.path.splitext(os.path.basename(audio_path))[0]
+            no_vocals_path = os.path.join(TEMP_DIR, 'htdemucs', base_name, 'no_vocals.wav')
+            if os.path.exists(no_vocals_path):
+                bg_audio_path = no_vocals_path
+        
+        # ── 0.5 Check for downloaded subtitles ──
+        segments = []
+        original_subs_found = False
+        import glob
+        video_base = os.path.splitext(video_path)[0]
+        sub_files = [f for f in glob.glob(f"{video_base}*") if f.endswith(('.vtt', '.srt'))]
+        if sub_files:
+            upd(job_id, stage='transcribe', progress=15, message='📂 Found exact subtitles! Bypassing audio transcription…')
+            segments = parse_subtitle_file(sub_files[0])
+            if segments:
+                original_subs_found = True
+                transcriber_engine = "Subtitles" # Force pipeline to skip Gemini Native
+
         if transcriber_engine == 'Gemini AI (Premium API)' and transcriber_key:
             # ── GEMINI NATIVE PIPELINE ──
+            check_cancel()
             upd(job_id, stage='transcribe', progress=10, message='☁️ Initiating Gemini Native Transcription…')
             segments = gemini_transcribe_video(video_path, transcriber_key, lang_label, upd_callback=upd, job_id=job_id)
             if not segments:
-                raise Exception("Gemini failed to return valid JSON segments. Ensure your API key is correct and try again.")
+                raise Exception("Gemini returned empty segments.")
             
             genders = []
             kiri_voices = []
             translated_segments = []
             
             for seg in segments:
-                id_tag = seg.get('speaker_identity', '')
                 translated_text = seg.get('text', '')
-                if id_tag:
-                    final_text = f"[{id_tag}]: {translated_text}"
-                else:
-                    final_text = translated_text
+                
+                # Remove English speaker tags so the TTS engine speaks pure Khmer
+                final_text = translated_text
                     
                 g = seg.get('gender', 'male')
                 genders.append(g)
@@ -907,49 +1081,83 @@ def process_video(job_id: str, video_path: str, options: dict):
                 })
                 
             translated_text = " ".join([s['text'] for s in translated_segments])
-            original_audio_path = video_path # For dubbing background
             if options.get('story_mode'):
-                raise Exception("Storytelling mode requires Local Whisper to extract transcripts. Please change Transcriber to 'Whisper (Local)'.")
+                check_cancel()
+                upd(job_id, stage='translate', progress=48, message=f'📋 Writing AI Recap in {lang_label}…')
+                try:
+                    from google import genai
+                    import json
+                    client = genai.Client(api_key=transcriber_key)
+                    
+                    # 1-to-1 Recap: Rewrite every single dialogue line to have a storytelling/recap tone, 
+                    # but keep the exact same number of segments to preserve PERFECT timing with the video!
+                    BATCH_SIZE = 40
+                    clean_sentences = []
+                    
+                    for batch_start in range(0, len(translated_segments), BATCH_SIZE):
+                        batch_segments = translated_segments[batch_start:batch_start+BATCH_SIZE]
+                        
+                        transcript_lines = []
+                        for i, seg in enumerate(batch_segments):
+                            transcript_lines.append(f"Line {i+1}: {seg['text']}")
+                        
+                        scenes_text = "\n".join(transcript_lines)
+                        
+                        custom_style = options.get('custom_prompt', '').strip() if options else ""
+                        custom_instruction = f"\n5. CUSTOM STYLE INSTRUCTION: {custom_style}\n" if custom_style else ""
+                        
+                        prompt = (f"You are a professional movie translator and adapter. "
+                                  f"Below is a transcript with exactly {len(batch_segments)} lines of dialogue. "
+                                  f"Your job is to REWRITE and ADAPT each line into {lang_label}. "
+                                  f"CRITICAL RULES:\n"
+                                  f"1. SUMMARIZE TO THE USEFUL CORE: Shorten the dialogue to its most useful and essential meaning so it is quick to speak, but KEEP IT AS A CONVERSATION (do not use 3rd person storytelling).\n"
+                                  f"2. You MUST output EXACTLY {len(batch_segments)} lines. Do not skip or combine any lines. Every single line must have a corresponding shortened translation.\n"
+                                  f"3. Translate naturally so it sounds like a professional movie dubbing script.\n"
+                                  f"4. Write ONLY in {lang_label}. Do NOT output any English.{custom_instruction}\n\n"
+                                  f"Output a JSON array of exactly {len(batch_segments)} strings.\n\n"
+                                  f"Transcript:\n{scenes_text}")
+                        
+                        generation_config = genai.types.GenerateContentConfig(response_mime_type="application/json")
+                        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=generation_config)
+                        
+                        try:
+                            recap_sentences = json.loads(response.text.strip())
+                        except json.JSONDecodeError:
+                            # If JSON is truncated, try to manually extract strings
+                            import re
+                            matches = re.findall(r'"([^"]*)"', response.text.strip())
+                            recap_sentences = matches if matches else []
+                            
+                        if not isinstance(recap_sentences, list):
+                            recap_sentences = [recap_sentences]
+                            
+                        for item in recap_sentences:
+                            if isinstance(item, str):
+                                clean_sentences.append(item)
+                            elif isinstance(item, dict) and 'text' in item:
+                                clean_sentences.append(str(item['text']))
+                            
+                    recap_sentences = clean_sentences if clean_sentences else [str(s) for s in recap_sentences]
+                    
+                    print(f"[Recap] AI returned {len(recap_sentences)} sentences for {len(translated_segments)} original lines")
+                    
+                    # Map the storytelling text directly back onto the PERFECT original timestamps
+                    for idx, seg in enumerate(translated_segments):
+                        if idx < len(recap_sentences):
+                            seg['text'] = recap_sentences[idx].strip()
+                        
+                except Exception as e:
+                    print(f"Recap generation failed: {e}")
+                    raise Exception(f"Recap generation failed: {str(e)}")
             
         else:
             # ── LOCAL WHISPER PIPELINE ──
-            # ── 1. Extract audio ──────────────────────────────────
-            debug_log("Calling upd for extract stage")
-            upd(job_id, stage='extract', progress=8,
-                message='🎵 Extracting audio from video…')
-            
-            debug_log("Starting subprocess ffmpeg extraction")
-            subprocess.run(
-                [FFMPEG_CMD, '-i', video_path,
-                 '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
-                 audio_path, '-y'],
-                check=True, capture_output=True
-            )
-            debug_log("ffmpeg extraction completed successfully")
-
-            original_audio_path = audio_path
-            if options.get('remove_vocals'):
-                upd(job_id, stage='isolate', progress=12, message='🎶 AI Vocal Removal: Isolating background music (this may take a minute)…')
-                debug_log("Running demucs vocal separation")
-                
-                subprocess.run([
-                    'demucs', '-n', 'htdemucs', '--two-stems', 'vocals', 
-                    '-o', TEMP_DIR, '-d', 'cpu', audio_path
-                ], check=True)
-                
-                base_name = os.path.splitext(os.path.basename(audio_path))[0]
-                no_vocals_path = os.path.join(TEMP_DIR, 'htdemucs', base_name, 'no_vocals.wav')
-                
-                if os.path.exists(no_vocals_path):
-                    original_audio_path = no_vocals_path
-                    debug_log("Vocal removal succeeded.")
-                else:
-                    debug_log("Vocal removal failed to output file, falling back to original audio.")
-
-            # ── 2. Transcribe using Whisper ───────────────────────
+            # ── 1. Transcribe using Whisper (or skip if subs found) ───────────────────────
             whisper_task = 'translate' if target_lang == 'English' else 'transcribe'
             
-            if 'Premium API' in transcriber_engine:
+            if original_subs_found:
+                pass
+            elif 'Premium API' in transcriber_engine:
                 if not transcriber_key:
                     raise Exception(f"Please provide an API Key for {transcriber_engine}.")
                 
@@ -1015,66 +1223,23 @@ def process_video(job_id: str, video_path: str, options: dict):
 
             if translator_engine == 'Gemini AI (Premium API)' and translator_key:
                 upd(job_id, message='☁️ Uploading video to Gemini for visual context…')
-                import google.generativeai as genai
-                genai.configure(api_key=translator_key)
+                from google import genai
+                client = genai.Client(api_key=translator_key)
                 try:
-                    video_file = genai.upload_file(path=video_path)
+                    video_file = client.files.upload(file=video_path)
                     upd(job_id, message='⏳ Waiting for Gemini to process video…')
                     while video_file.state.name == 'PROCESSING':
+                        check_cancel()
                         time.sleep(2)
-                        video_file = genai.get_file(video_file.name)
+                        video_file = client.files.get(name=video_file.name)
                 except Exception as e:
                     print(f"[Gemini Video Upload Error] {e}")
                     video_file = None
 
             translated_segments = []
             
-            if options.get('story_mode'):
-                upd(job_id, stage='translate', progress=48, message=f'📖 Writing AI Story in {lang_label}…')
-                
-                if not translator_key:
-                    raise Exception("Storytelling Mode requires a Gemini API Key. Please enter your Gemini API key in the Translator Key box.")
-                    
-                try:
-                    import google.generativeai as genai
-                    genai.configure(api_key=translator_key)
-                    
-                    transcript = "\n".join([f"[{s['start']:.1f}s - {s['end']:.1f}s]: {s['text']}" for s in segments])
-                    prompt = (f"You are an expert movie narrator. Watch this video and read the following dialogue transcript. "
-                              f"Write a continuous, engaging storytelling narrative that describes the visual actions and summarizes the conversations. "
-                              f"Do not use timestamps or speaker tags. Write the entire story exclusively in {lang_label}. "
-                              f"Make it flow naturally as a single story.\n\nTranscript:\n{transcript}")
-                    
-                    try:
-                        model = genai.GenerativeModel('gemini-2.5-pro')
-                        if video_file:
-                            response = model.generate_content([prompt, video_file])
-                        else:
-                            response = model.generate_content(prompt)
-                    except Exception as e:
-                        if '429' in str(e) or 'quota' in str(e).lower():
-                            print(f"[Gemini] Pro quota exceeded, falling back to Flash: {e}")
-                            upd(job_id, message='⚠️ Pro quota exceeded. Falling back to Gemini Flash...')
-                            model = genai.GenerativeModel('gemini-2.5-flash')
-                            if video_file:
-                                response = model.generate_content([prompt, video_file])
-                            else:
-                                response = model.generate_content(prompt)
-                        else:
-                            raise e
-                            
-                    story_text = response.text.strip()
-                    import re
-                    # Split into sentences for TTS
-                    story_sentences = [s.strip() for s in re.split(r'(?<=[.!?។])\s+', story_text) if s.strip()]
-                    for s in story_sentences:
-                        translated_segments.append({'start': 0, 'end': 0, 'text': s})
-                        genders = ['male'] * len(translated_segments) # Just use the male voice (single narrator)
-                        
-                except Exception as e:
-                    print(f"Story generation failed: {e}")
-                    raise Exception(f"Story generation failed: {str(e)}")
-            elif target_lang == 'English' and whisper_task == 'translate':
+            # Step 1: Base 1:1 Translation
+            if target_lang == 'English' and whisper_task == 'translate':
                 for seg in segments:
                     translated_segments.append({
                         'start': seg['start'],
@@ -1107,14 +1272,137 @@ def process_video(job_id: str, video_path: str, options: dict):
                         'text':  t_text or seg['text'].strip(),
                     })
                 
+                        
+            # Step 2: Dual Dubbing (Recap Injection)
+            if options.get('story_mode'):
+                check_cancel()
+                upd(job_id, stage='translate', progress=48, message=f'📋 Writing AI Recap in {lang_label}…')
+                
+                if not translator_key:
+                    raise Exception("Recap Mode requires a Gemini API Key. Please enter your Gemini API key in the Translator Key box.")
+                    
+                try:
+                    from google import genai
+                    import json, math
+                    client = genai.Client(api_key=translator_key)
+                    
+                    # Group original translated segments into scene chunks
+                    scene_chunks = []
+                    current_chunk = []
+                    GAP_THRESHOLD = 2.0  # seconds of silence = new scene
+                    
+                    for i, seg in enumerate(translated_segments):
+                        if not current_chunk:
+                            current_chunk.append(seg)
+                        else:
+                            gap = seg['start'] - current_chunk[-1]['end']
+                            if gap > GAP_THRESHOLD:
+                                scene_chunks.append(current_chunk)
+                                current_chunk = [seg]
+                            else:
+                                current_chunk.append(seg)
+                    if current_chunk:
+                        scene_chunks.append(current_chunk)
+                    
+                    # If too few chunks, split into roughly equal groups
+                    if len(scene_chunks) < 3 and len(translated_segments) > 3:
+                        scene_chunks = []
+                        chunk_size = max(2, len(translated_segments) // 4)
+                        for i in range(0, len(translated_segments), chunk_size):
+                            scene_chunks.append(translated_segments[i:i+chunk_size])
+                    
+                    print(f"[Recap] Split {len(translated_segments)} segments into {len(scene_chunks)} scene chunks")
+                    
+                    # Build prompt with numbered scenes
+                    scene_descriptions = []
+                    for i, chunk in enumerate(scene_chunks):
+                        chunk_text = " ".join([s['text'] for s in chunk])
+                        t_start = chunk[0]['start']
+                        t_end = chunk[-1]['end']
+                        scene_descriptions.append(f"Scene {i+1} [{t_start:.1f}s-{t_end:.1f}s]: {chunk_text}")
+                    
+                    scenes_text = "\n".join(scene_descriptions)
+                    
+                    prompt = (f"You are a professional movie recap narrator (like YouTube movie recaps). "
+                              f"Below are {len(scene_chunks)} scenes from a movie. "
+                              f"Write EXACTLY {len(scene_chunks)} recap sentences — one per scene, in order. "
+                              f"Each sentence should describe what happens in that scene. Keep each sentence SHORT (under 25 words). "
+                              f"CRITICAL: Write ONLY in {lang_label}. No English.\n\n"
+                              f"Output a JSON array of exactly {len(scene_chunks)} strings.\n\n"
+                              f"Scenes:\n{scenes_text}")
+                    
+                    generation_config = genai.types.GenerateContentConfig(response_mime_type="application/json")
+                    try:
+                        if video_file:
+                            response = client.models.generate_content(model='gemini-2.5-flash', contents=[video_file, prompt], config=generation_config)
+                        else:
+                            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=generation_config)
+                    except Exception as e:
+                        raise e
+                    
+                    recap_sentences = json.loads(response.text.strip())
+                    if not isinstance(recap_sentences, list):
+                        recap_sentences = [recap_sentences]
+                    # Clean up
+                    clean_sentences = []
+                    for item in recap_sentences:
+                        if isinstance(item, str):
+                            clean_sentences.append(item)
+                        elif isinstance(item, dict) and 'text' in item:
+                            clean_sentences.append(str(item['text']))
+                    recap_sentences = clean_sentences if clean_sentences else [str(s) for s in recap_sentences]
+                    
+                    print(f"[Recap] AI returned {len(recap_sentences)} sentences for {len(scene_chunks)} scenes")
+                    
+                    # Inject recap sentences before each scene
+                    final_segments = []
+                    for idx, scene in enumerate(scene_chunks):
+                        if idx < len(recap_sentences):
+                            recap_text = recap_sentences[idx]
+                            scene_start = scene[0]['start']
+                            
+                            if idx == 0:
+                                recap_start = max(0.0, scene_start - 3.5)
+                            else:
+                                prev_scene_end = scene_chunks[idx-1][-1]['end']
+                                recap_start = max(prev_scene_end + 0.1, scene_start - 3.5)
+                                
+                            recap_end = scene_start
+                            
+                            final_segments.append({
+                                'start': round(recap_start, 2),
+                                'end': round(recap_end, 2),
+                                'text': recap_text.strip(),
+                                'gender': 'narrator'
+                            })
+                            
+                        # Add the 1:1 translated dialogue segments
+                        for seg in scene:
+                            final_segments.append(seg)
+                            
+                    translated_segments = final_segments
+                    print(f"[Recap] Final Dual Dubbing segments: {[(s['start'], s.get('gender', 'unknown'), s['text'][:10]) for s in translated_segments]}")
+                        
+                except Exception as e:
+                    print(f"Recap generation failed: {e}")
+                    raise Exception(f"Recap generation failed: {str(e)}")
+                
                 if video_file:
                     try:
-                        import google.generativeai as genai
-                        genai.delete_file(video_file.name)
+                        from google import genai
+                        client.files.delete(name=video_file.name)
                     except:
                         pass
 
             translated_text = " ".join([s['text'] for s in translated_segments])
+            
+            # Clean up the uploaded video file
+            if video_file:
+                try:
+                    from google import genai
+                    client.files.delete(name=video_file.name)
+                except:
+                    pass
 
         # ── 5. Generate Text-to-Speech (TTS) ──────────────────
         upd(job_id,
@@ -1137,14 +1425,15 @@ def process_video(job_id: str, video_path: str, options: dict):
         resolved_male = opt_voice_male if (opt_voice_male and opt_voice_male != 'Auto Detect') else voice_male
         resolved_female = opt_voice_female if (opt_voice_female and opt_voice_female != 'Auto Detect') else voice_female
         timed_dub = build_timed_audio(
-            translated_segments, audio_path, video_duration, job_id, tts_progress,
+            translated_segments, bg_audio_path, video_duration, job_id, tts_progress,
             voice_male=resolved_male,
             voice_female=resolved_female,
             options=options, 
             original_audio_path=original_audio_path, 
             video_path=video_path,
-            genders=['male'] * len(translated_segments) if is_story else None,
-            sequential_mode=is_story
+            genders=[s.get('gender') for s in translated_segments] if any(s.get('gender') for s in translated_segments) else None,
+            sequential_mode=False,
+            is_vocals_removed=bool(options.get('remove_vocals'))
         )
         
         upd(job_id, segments=translated_segments, progress=83,
@@ -1170,7 +1459,10 @@ def process_video(job_id: str, video_path: str, options: dict):
         srt_path_ffmpeg = srt_file.replace('\\', '/').replace(':', '\\:')
         fonts_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         fonts_dir_ffmpeg = fonts_dir.replace('\\', '/').replace(':', '\\:')
-        style = f"Fontname={font_name},FontSize=10,PrimaryColour=&H00FFFF,Outline=1,Shadow=1"
+        # WeTV-style subtitles: white text, semi-transparent dark box, clean and readable
+        style = (f"Fontname={font_name},FontSize=11,PrimaryColour=&H00FFFFFF,"
+                 f"OutlineColour=&H80000000,BackColour=&H80000000,"
+                 f"Outline=2,Shadow=0,BorderStyle=4,MarginV=25,Alignment=2")
         style_escaped = style.replace(",", "\\,")
         vf_filters.append(f"subtitles='{srt_path_ffmpeg}':fontsdir='{fonts_dir_ffmpeg}':force_style='{style_escaped}'")
         
@@ -1242,7 +1534,7 @@ UI_TEXT = {
         "lbl_dub_gender": "Dub As:",
         "male_only": "Male Only",
         "female_only": "Female Only",
-        "chk_story": "Enable Storytelling Mode",
+        "chk_story": "Dual Dubbing (Recap+Voice)",
         "chk_vocals": "Remove Vocals",
         "chk_mirror": "Mirror Video",
         "chk_blur": "Hide Watermarks",
@@ -1282,7 +1574,7 @@ UI_TEXT = {
         "lbl_dub_gender": "បញ្ចូលជា:",
         "male_only": "ប្រុសប៉ុណ្ណោះ",
         "female_only": "ស្រីប៉ុណ្ណោះ",
-        "chk_story": "របៀបនិទានរឿង",
+        "chk_story": "បញ្ចូលសំឡេងពីរ (សង្ខេប+សន្ទនា)",
         "chk_vocals": "ដកសំឡេងច្រៀងចេញ",
         "chk_mirror": "ត្រឡប់វីដេអូ (Mirror)",
         "chk_blur": "លុបឡូហ្គោ",
@@ -1298,6 +1590,8 @@ class KhmerDubApp(ctk.CTk):
         global app_gui
         app_gui = self  
         self.title("BongbeeAI dub")
+        import threading
+        self.cancel_event = threading.Event()
         self.geometry("700x650")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -1435,19 +1729,33 @@ class KhmerDubApp(ctk.CTk):
         self.chk_emotion_var = ctk.StringVar(value="on")
         self.chk_vocals_var = ctk.StringVar(value="off")
         self.chk_story_var = ctk.StringVar(value="off")
+        self.chk_sync_var = ctk.StringVar(value="on")
         
-        self.chk_story = ctk.CTkCheckBox(self.chk_frame, text="Enable Storytelling Mode", variable=self.chk_story_var, onvalue="on", offvalue="off", fg_color="#ffc107", hover_color="#e0a800")
+        self.chk_story = ctk.CTkCheckBox(self.chk_frame, text="Generate Recap", variable=self.chk_story_var, onvalue="on", offvalue="off", fg_color="#ffc107", hover_color="#e0a800")
         self.chk_story.pack(side="left", padx=10)
         self.chk_vocals = ctk.CTkCheckBox(self.chk_frame, text="Remove Vocals", variable=self.chk_vocals_var, onvalue="on", offvalue="off")
         self.chk_vocals.pack(side="left", padx=10)
+        self.chk_sync = ctk.CTkCheckBox(self.chk_frame, text="Exact Lip Sync", variable=self.chk_sync_var, onvalue="on", offvalue="off")
+        self.chk_sync.pack(side="left", padx=10)
         self.chk_mirror = ctk.CTkCheckBox(self.chk_frame, text="Mirror Video", variable=self.chk_mirror_var, onvalue="on", offvalue="off")
         self.chk_mirror.pack(side="left", padx=10)
         self.chk_blur = ctk.CTkCheckBox(self.chk_frame, text="Hide Watermarks", variable=self.chk_blur_var, onvalue="on", offvalue="off")
         self.chk_blur.pack(side="left", padx=10)
 
+        self.custom_prompt_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.lbl_custom_prompt = ctk.CTkLabel(self.custom_prompt_frame, text="Custom AI Prompt:", font=("Segoe UI", 14, "bold"))
+        self.lbl_custom_prompt.pack(side="left", padx=10)
+        self.custom_prompt_var = ctk.StringVar(value="")
+        self.ent_custom_prompt = ctk.CTkEntry(self.custom_prompt_frame, textvariable=self.custom_prompt_var, width=500, placeholder_text="Optional: Paste a custom style (e.g. 'Make it an interactive medical game...')", font=("Segoe UI", 12))
+        self.ent_custom_prompt.pack(side="left", padx=10)
+
         
-        self.btn_start = ctk.CTkButton(self.main_frame, text="Start Dubbing", command=self.start_dubbing, font=("Segoe UI", 18, "bold"), fg_color="#28a745", hover_color="#218838", height=45)
-        self.btn_start.pack(pady=25)
+        self.btn_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.btn_frame.pack(pady=25)
+        self.btn_start = ctk.CTkButton(self.btn_frame, text="Start Dubbing", command=self.start_dubbing, font=("Segoe UI", 18, "bold"), fg_color="#28a745", hover_color="#218838", height=45)
+        self.btn_start.pack(side="left", padx=10)
+        self.btn_stop = ctk.CTkButton(self.btn_frame, text="Stop Process", command=self.stop_dubbing, font=("Segoe UI", 18, "bold"), fg_color="#dc3545", hover_color="#c82333", height=45, state="disabled")
+        self.btn_stop.pack(side="left", padx=10)
         
         self.progress_bar = ctk.CTkProgressBar(self.main_frame, width=500, height=20)
         self.progress_bar.pack(pady=10)
@@ -1506,7 +1814,12 @@ class KhmerDubApp(ctk.CTk):
                     'source_address': '0.0.0.0', 
                     'socket_timeout': 30,
                     'retries': 10,
-                    'fragment_retries': 10
+                    'fragment_retries': 10,
+                    'writesubtitles': True,
+                    'writeautomaticsub': True,
+                    'subtitleslangs': ['en', 'all'],
+                    'subtitleslangs': ['en', 'en-US', 'en-GB', 'zh-cn', 'th', 'id', 'vi', 'ko', 'ja', 'all'],
+                    'subtitlesformat': 'vtt/srt/best'
                 }
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1648,6 +1961,8 @@ class KhmerDubApp(ctk.CTk):
             self.lbl_status.configure(text=kw['message'])
         if kw.get('status') == 'complete':
             self.btn_start.configure(state="normal", text="Start Dubbing")
+            if hasattr(self, 'btn_stop'):
+                self.btn_stop.configure(state="disabled", text="Stop Process")
             out = kw.get('output_video')
             messagebox.showinfo("Success", f"Done! Video saved as:\n{out}")
             try:
@@ -1655,6 +1970,8 @@ class KhmerDubApp(ctk.CTk):
             except: pass
         elif kw.get('status') == 'error':
             self.btn_start.configure(state="normal", text="Start Dubbing")
+            if hasattr(self, 'btn_stop'):
+                self.btn_stop.configure(state="disabled", text="Stop Process")
             messagebox.showerror("Error", kw.get('message'))
 
     def update_ui_visibility(self, choice=None):
@@ -1741,6 +2058,7 @@ class KhmerDubApp(ctk.CTk):
                             self.voice_frame.pack_forget()
                             
                         self.chk_frame.pack(pady=15, fill="x")
+                        self.custom_prompt_frame.pack(pady=5, fill="x")
                         self.btn_start.pack(pady=25)
                         
         self.progress_bar.pack_forget()
@@ -1810,12 +2128,19 @@ class KhmerDubApp(ctk.CTk):
                 
         threading.Thread(target=fetch_thread, daemon=True).start()
             
+    def stop_dubbing(self):
+        self.cancel_event.set()
+        self.btn_stop.configure(state="disabled", text="Stopping...")
+
     def start_dubbing(self):
         if not self.video_path:
             messagebox.showerror("Error", "Please select a video first!")
             return
             
+        self.cancel_event.clear()
         self.btn_start.configure(state="disabled", text="Processing...")
+        if hasattr(self, 'btn_stop'):
+            self.btn_stop.configure(state="normal", text="Stop Process")
         self.progress_bar.set(0)
         self.lbl_status.configure(text="⚙️ Initializing AI components...")
         job_id = str(uuid.uuid4())[:8]
@@ -1824,6 +2149,7 @@ class KhmerDubApp(ctk.CTk):
             'blur': self.chk_blur_var.get() == "on",
             'smart_emotion': self.chk_emotion_var.get() == "on",
             'remove_vocals': self.chk_vocals_var.get() == "on",
+            'custom_prompt': self.custom_prompt_var.get().strip(),
             'target_lang': self.lang_var.get(),
             'transcriber': self.transcriber_var.get(),
             'translator': self.trans_var.get(),
@@ -1836,6 +2162,7 @@ class KhmerDubApp(ctk.CTk):
             'voice_male': self.voice_male_var.get(),
             'voice_female': self.voice_female_var.get(),
             'story_mode': self.chk_story_var.get() == "on",
+            'auto_sync': self.chk_sync_var.get() == "on",
             'dub_gender': self.dub_gender_var.get()  # 'Auto Detect', 'Male Only', or 'Female Only'
         }
         
