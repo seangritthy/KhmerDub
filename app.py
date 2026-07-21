@@ -615,10 +615,17 @@ def build_timed_audio(
     def generate_tts_for_seg(i, seg):
         text = seg['text'].strip()
         import re
-        # Remove [Speaker] tags, (actions), and Speaker: prefixes so TTS doesn't read them aloud
+        
+        # Check if the text contains (...) for "thinking" inner monologue
+        if re.search(r'\(.*?\)', text):
+            seg['is_thinking'] = True
+            
+        # Remove [Speaker] tags and Speaker: prefixes so TTS doesn't read them aloud
         text = re.sub(r'\[.*?\]:?\s*', '', text)
-        text = re.sub(r'\(.*?\)\s*', '', text)
         text = re.sub(r'^[\w\s]+:\s*', '', text)
+        
+        # Remove the parentheses symbols but KEEP the text inside so it gets voiced!
+        text = text.replace('(', '').replace(')', '')
         text = text.strip()
         
         if not text:
@@ -684,6 +691,16 @@ def build_timed_audio(
                 # Slightly speed up narrator and increase volume so they sound distinct
                 clip = speed_change(clip, 1.15)
                 clip = clip + 2
+                
+            if seg.get('is_thinking'):
+                # Apply a cinematic "inner voice / thinking" echo effect
+                from pydub import AudioSegment
+                # Add silence to the end so the echo has room to fade out
+                clip = clip + AudioSegment.silent(duration=400)
+                echo1 = clip - 8
+                echo2 = clip - 16
+                clip = clip.overlay(echo1, position=150)
+                clip = clip.overlay(echo2, position=300)
 
             if options and options.get('auto_sync', True) and not sequential_mode and seg.get('end', 0) > 0:
                 target_len = int((seg['end'] - seg['start']) * 1000)
