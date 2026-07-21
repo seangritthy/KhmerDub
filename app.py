@@ -614,6 +614,13 @@ def build_timed_audio(
 
     def generate_tts_for_seg(i, seg):
         text = seg['text'].strip()
+        import re
+        # Remove [Speaker] tags, (actions), and Speaker: prefixes so TTS doesn't read them aloud
+        text = re.sub(r'\[.*?\]:?\s*', '', text)
+        text = re.sub(r'\(.*?\)\s*', '', text)
+        text = re.sub(r'^[\w\s]+:\s*', '', text)
+        text = text.strip()
+        
         if not text:
             return i, None
         gender = genders[i] or 'male'
@@ -1822,19 +1829,32 @@ class KhmerDubApp(ctk.CTk):
                     'subtitlesformat': 'vtt/srt/best'
                 }
                 
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                except Exception as e:
-                    err_msg = str(e).lower()
-                    if "429" in err_msg or "too many requests" in err_msg or "subtitles" in err_msg:
-                        print(f"Subtitle download failed ({e}). Retrying without subtitles...")
-                        ydl_opts['writesubtitles'] = False
-                        ydl_opts['writeautomaticsub'] = False
+                max_attempts = 3
+                attempt = 0
+                while attempt < max_attempts:
+                    attempt += 1
+                    try:
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                             info = ydl.extract_info(url, download=True)
-                    else:
-                        raise e
+                        break  # Success, exit loop
+                    except Exception as e:
+                        err_msg = str(e).lower()
+                        print(f"Download attempt {attempt} failed: {e}")
+                        
+                        if attempt == max_attempts:
+                            raise e
+                            
+                        # Adjust options based on error
+                        if "429" in err_msg or "too many requests" in err_msg or "subtitles" in err_msg:
+                            print("-> Disabling subtitles for next attempt...")
+                            ydl_opts['writesubtitles'] = False
+                            ydl_opts['writeautomaticsub'] = False
+                        elif "503" in err_msg or "service unavailable" in err_msg:
+                            print("-> Applying iOS client spoofing for next attempt...")
+                            ydl_opts['extractor_args'] = {'youtube': ['player_client=ios']}
+                        else:
+                            # Unhandled error, just retry normally or maybe raise?
+                            pass
 
                 if 'requested_downloads' in info and len(info['requested_downloads']) > 0:
                     filepath = info['requested_downloads'][0].get('filepath') or ydl.prepare_filename(info)
