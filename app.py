@@ -723,6 +723,24 @@ def build_timed_audio(
             try: os.remove(path)
             except: pass
 
+    # Apply Background Music if available
+    bgm_path = options.get('bgm_path')
+    if bgm_path and os.path.exists(bgm_path):
+        try:
+            print(f"[BGM] Mixing background music from: {bgm_path}")
+            bgm_audio = AudioSegment.from_file(bgm_path)
+            # Loop BGM if shorter than video
+            while len(bgm_audio) < len(bg_layer):
+                bgm_audio += bgm_audio
+            # Truncate to exact length
+            bgm_audio = bgm_audio[:len(bg_layer)]
+            # Lower volume to exactly 15% (-16.5 dB)
+            bgm_audio = bgm_audio - 16.5
+            # Overlay BGM onto bg_layer
+            bg_layer = bg_layer.overlay(bgm_audio)
+        except Exception as e:
+            print(f"[BGM Error] Could not mix background music: {e}")
+
     # Combine ducked background with speech layer
     master = bg_layer.overlay(speech_layer)
 
@@ -1647,6 +1665,15 @@ class KhmerDubApp(ctk.CTk):
         self.btn_download = ctk.CTkButton(self.url_frame, text="Download Video", command=self.start_download, font=("Segoe UI", 14), width=140, fg_color="#17a2b8", hover_color="#138496")
         self.btn_download.pack(side="left", padx=5)
         
+        self.bgm_url_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.bgm_url_frame.pack(pady=0, fill="x")
+        
+        self.bgm_url_entry = ctk.CTkEntry(self.bgm_url_frame, placeholder_text="Optional: Background Music URL (Downloads with video)", font=("Segoe UI", 12), width=350)
+        self.bgm_url_entry.pack(side="left", padx=10)
+        
+        self.lbl_bgm_status = ctk.CTkLabel(self.bgm_url_frame, text="", font=("Segoe UI", 12), text_color="gray")
+        self.lbl_bgm_status.pack(side="left", padx=5)
+        
         self.lang_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.lang_frame.pack(pady=5, fill="x")
         self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="1. Dub Into:", font=("Segoe UI", 14, "bold"))
@@ -1867,6 +1894,36 @@ class KhmerDubApp(ctk.CTk):
                     matches = glob.glob(base + ".*")
                     if matches:
                         filepath = matches[0]
+                        
+                # ── BGM Download Logic ──
+                bgm_url = getattr(self, 'bgm_url_entry', None)
+                if bgm_url and bgm_url.get().strip():
+                    bgm_url_val = bgm_url.get().strip()
+                    self.after(0, lambda: self.lbl_status.configure(text="Downloading Background Music..."))
+                    bgm_opts = {
+                        'format': 'bestaudio/best',
+                        'outtmpl': os.path.join(TEMP_DIR, 'bgm_%(id)s.%(ext)s'),
+                        'ffmpeg_location': FFMPEG_CMD,
+                        'progress_hooks': [progress_hook],
+                        'quiet': True,
+                        'no_warnings': True,
+                        'noplaylist': True,
+                    }
+                    try:
+                        with yt_dlp.YoutubeDL(bgm_opts) as ydl_bgm:
+                            bgm_info = ydl_bgm.extract_info(bgm_url_val, download=True)
+                            bgm_path = ydl_bgm.prepare_filename(bgm_info)
+                            if not os.path.exists(bgm_path):
+                                bgm_base = os.path.splitext(bgm_path)[0]
+                                for ext in ['.webm', '.m4a', '.mp3']:
+                                    if os.path.exists(bgm_base + ext):
+                                        bgm_path = bgm_base + ext
+                                        break
+                            self.bgm_path = bgm_path
+                            self.after(0, lambda: self.lbl_bgm_status.configure(text=f"Loaded BGM", text_color="#28a745"))
+                    except Exception as e:
+                        print(f"Failed to download BGM: {e}")
+                        self.after(0, lambda: self.lbl_bgm_status.configure(text="BGM Download Failed", text_color="red"))
                     
                 def on_success():
                     self.video_path = filepath
@@ -2196,7 +2253,8 @@ class KhmerDubApp(ctk.CTk):
             'voice_female': self.voice_female_var.get(),
             'story_mode': self.chk_story_var.get() == "on",
             'auto_sync': self.chk_sync_var.get() == "on",
-            'dub_gender': self.dub_gender_var.get()  # 'Auto Detect', 'Male Only', or 'Female Only'
+            'dub_gender': self.dub_gender_var.get(),  # 'Auto Detect', 'Male Only', or 'Female Only'
+            'bgm_path': getattr(self, 'bgm_path', None)
         }
         
         def run_with_error_catch():
