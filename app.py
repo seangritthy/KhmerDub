@@ -54,6 +54,7 @@ from google import genai
 # ── Runtime directories ───────────
 _BASE      = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(os.path.expanduser('~'), 'KhmerDub_Output')
+GLOBAL_GEMINI_MODEL = 'gemini-2.5-flash'
 TEMP_DIR = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'KhmerDub', 'temp')
 API_KEYS_PATH = os.path.join(TEMP_DIR, 'api_keys.json')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -188,7 +189,7 @@ def detect_segment_gender(audio_path: str, start_sec: float, end_sec: float, vid
                 
                 client = genai.Client(api_key=api_key)
                 response = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model=options.get('translator_model', GLOBAL_GEMINI_MODEL),
                     contents=[
                     "Identify the gender of the primary person speaking or the most prominent character in this image. Reply with exactly one word: 'male' or 'female'. If you cannot tell, reply 'unknown'.",
                     img
@@ -694,7 +695,6 @@ def build_timed_audio(
                 
             if seg.get('is_thinking'):
                 # Apply a cinematic "inner voice / thinking" echo effect
-                from pydub import AudioSegment
                 # Add silence to the end so the echo has room to fade out
                 clip = clip + AudioSegment.silent(duration=400)
                 echo1 = clip - 8
@@ -845,7 +845,7 @@ def robust_translate_batch(texts: list, dest='km', retries=5) -> list:
             time.sleep(2 ** attempt)
     return texts
 
-def gemini_translate_batch(texts: list, human_dest='Khmer', dest_code='km', api_key='', video_file=None, retries=3) -> list:
+def gemini_translate_batch(texts: list, human_dest='Khmer', dest_code='km', api_key='', video_file=None, retries=3, model=GLOBAL_GEMINI_MODEL) -> list:
     """Translate using Gemini Pro for perfect conversational context and add speaker tags/visual context."""
     if not texts: return []
     from google import genai
@@ -855,13 +855,16 @@ def gemini_translate_batch(texts: list, human_dest='Khmer', dest_code='km', api_
     text_block = "\n".join(texts)
     prompt = f"""You are an expert movie subtitle translator. 
 Translate the following video subtitle script into {human_dest}. 
-Maintain conversational tone, context, and gender pronouns.
+Maintain a highly professional, natural, and native conversational tone. Use professional Khmer phrasing that is easy for a native speaker to understand, while preserving context and gender pronouns.
 CRITICAL: Translate accurately and clearly, preserving the full meaning of every word. Do not summarize or drop any details. The translation must be highly detailed and exact.
 
-If a video file is provided, use it to understand who is speaking. For EACH line in the translation, ADD the speaker's identity and any visual context describing what happens. 
-For example, output lines exactly like this:
-[Boy in truck]: អ្នកមើលទៅស្រស់ស្អាតណាស់។
-(The blonde girl smiles, then looks surprised as another car pulls up beside them)
+CRITICAL INSTRUCTION FOR NOUNS: Translate animal species and specific objects with 100% accuracy. For example, if the text says "mongoose", you must translate it to the exact word for mongoose (សត្វសំពោច in Khmer), DO NOT mistake it for a monkey (ស្វា). Pay close attention to these details!
+
+CRITICAL INSTRUCTION FOR METAPHORS & PSYCHOLOGY: If the text is a fable, motivational speech, or discusses psychology (e.g., "cognitive manipulation", "attribution error"), you MUST use precise, academic, and culturally appropriate Khmer terminology. Ensure metaphors (like jumping off a cliff, grills, etc.) and the moral of the story are translated with high impact and native eloquence.
+
+If a video file is provided, use it strictly as context to understand the scene, tone, and who is speaking so you can translate more accurately.
+CRITICAL: DO NOT add speaker names, timestamps, or visual descriptions to your output.
+You MUST output EXACTLY one line of translated text for every one line of input text. Maintain a strict 1-to-1 line mapping.
 
 Keep the exact same number of lines as the original script. Do not add any extra markdown formatting outside of the subtitles.
 
@@ -871,7 +874,7 @@ Keep the exact same number of lines as the original script. Do not add any extra
         try:
             # Pass video file if available
             contents = [video_file, prompt] if video_file else [prompt]
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
+            response = client.models.generate_content(model=model, contents=contents)
             
             translated = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
             
@@ -889,7 +892,7 @@ Keep the exact same number of lines as the original script. Do not add any extra
                 return robust_translate_batch(texts, dest=dest_code)
             time.sleep(2 ** attempt)
     
-def deepseek_translate_batch(texts: list, human_dest='Khmer', dest_code='km', api_key='', retries=3) -> list:
+def deepseek_translate_batch(texts: list, human_dest='Khmer', dest_code='km', api_key='', retries=3, model='deepseek-chat') -> list:
     """Translate using DeepSeek API for accurate conversational context."""
     if not texts: return []
     import requests
@@ -897,8 +900,12 @@ def deepseek_translate_batch(texts: list, human_dest='Khmer', dest_code='km', ap
     text_block = "\n".join(texts)
     prompt = f"""You are an expert movie subtitle translator. 
 Translate the following video subtitle script into {human_dest}. 
-Maintain conversational tone, context, and gender pronouns.
+Maintain a highly professional, natural, and native conversational tone. Use professional Khmer phrasing that is easy for a native speaker to understand, while preserving context and gender pronouns.
 CRITICAL: Translate accurately and clearly, preserving the full meaning of every word. Do not summarize or drop any details. The translation must be highly detailed and exact.
+
+CRITICAL INSTRUCTION FOR NOUNS: Translate animal species and specific objects with 100% accuracy. For example, if the text says "mongoose", you must translate it to the exact word for mongoose (សត្វសំពោច in Khmer), DO NOT mistake it for a monkey (ស្វា). Pay close attention to these details!
+
+CRITICAL INSTRUCTION FOR METAPHORS & PSYCHOLOGY: If the text is a fable, motivational speech, or discusses psychology (e.g., "cognitive manipulation", "attribution error"), you MUST use precise, academic, and culturally appropriate Khmer terminology. Ensure metaphors and the moral of the story are translated with high impact and native eloquence.
 
 Keep the exact same number of lines as the original script. Do not add any extra markdown formatting or conversational text, just output the {len(texts)} translated lines.
 
@@ -910,7 +917,7 @@ Script:
         "Authorization": f"Bearer {api_key}"
     }
     data = {
-        "model": "deepseek-chat",
+        "model": model,
         "messages": [
             {"role": "system", "content": "You are a professional translator."},
             {"role": "user", "content": prompt}
@@ -941,7 +948,7 @@ Script:
             time.sleep(2 ** attempt)
     return texts
 
-def gemini_transcribe_video(video_path: str, api_key: str, human_dest: str, upd_callback=None, job_id=None) -> list:
+def gemini_transcribe_video(video_path: str, api_key: str, human_dest: str, upd_callback=None, job_id=None, model=GLOBAL_GEMINI_MODEL) -> list:
     """Directly transcribe and translate video to JSON using Gemini 1.5 Pro."""
     from google import genai
     import json
@@ -980,7 +987,7 @@ Example output:
     try:
         from google import genai
         response = client.models.generate_content(
-            model='gemini-2.5-flash', 
+            model=model, 
             contents=[video_file, prompt],
             config=genai.types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -1098,7 +1105,7 @@ def process_video(job_id: str, video_path: str, options: dict):
             # ── GEMINI NATIVE PIPELINE ──
             check_cancel()
             upd(job_id, stage='transcribe', progress=10, message='☁️ Initiating Gemini Native Transcription…')
-            segments = gemini_transcribe_video(video_path, transcriber_key, lang_label, upd_callback=upd, job_id=job_id)
+            segments = gemini_transcribe_video(video_path, transcriber_key, lang_label, upd_callback=upd, job_id=job_id, model=options.get('transcriber_model', GLOBAL_GEMINI_MODEL))
             if not segments:
                 raise Exception("Gemini returned empty segments.")
             
@@ -1160,7 +1167,7 @@ def process_video(job_id: str, video_path: str, options: dict):
                                   f"Transcript:\n{scenes_text}")
                         
                         generation_config = genai.types.GenerateContentConfig(response_mime_type="application/json")
-                        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=generation_config)
+                        response = client.models.generate_content(model=options.get('translator_model', GLOBAL_GEMINI_MODEL), contents=prompt, config=generation_config)
                         
                         try:
                             recap_sentences = json.loads(response.text.strip())
@@ -1209,7 +1216,7 @@ def process_video(job_id: str, video_path: str, options: dict):
                 import requests
                 headers = {'Authorization': f'Bearer {transcriber_key}'}
                 url = 'https://api.groq.com/openai/v1/audio/transcriptions' if 'Groq' in transcriber_engine else 'https://api.openai.com/v1/audio/transcriptions'
-                model_name = 'whisper-large-v3' if 'Groq' in transcriber_engine else 'whisper-1'
+                model_name = options.get('transcriber_model', 'whisper-large-v3' if 'Groq' in transcriber_engine else 'whisper-1')
                 
                 with open(audio_path, 'rb') as f:
                     files = {'file': (os.path.basename(audio_path), f, 'audio/wav')}
@@ -1298,9 +1305,9 @@ def process_video(job_id: str, video_path: str, options: dict):
                     upd(job_id, message=f'🌏 Translating batch {i//chunk_size + 1}…')
                     
                     if translator_engine == 'Gemini AI (Premium API)' and translator_key:
-                        translated_texts.extend(gemini_translate_batch(chunk, human_dest=lang_label, dest_code=dest_code, api_key=translator_key, video_file=video_file))
+                        translated_texts.extend(gemini_translate_batch(chunk, human_dest=lang_label, dest_code=dest_code, api_key=translator_key, video_file=video_file, model=options.get('translator_model', GLOBAL_GEMINI_MODEL)))
                     elif translator_engine == 'DeepSeek (Premium API)' and translator_key:
-                        translated_texts.extend(deepseek_translate_batch(chunk, human_dest=lang_label, dest_code=dest_code, api_key=translator_key))
+                        translated_texts.extend(deepseek_translate_batch(chunk, human_dest=lang_label, dest_code=dest_code, api_key=translator_key, model=options.get('translator_model', 'deepseek-chat')))
                     else:
                         translated_texts.extend(robust_translate_batch(chunk, dest=dest_code))
                     
@@ -1376,9 +1383,9 @@ def process_video(job_id: str, video_path: str, options: dict):
                     generation_config = genai.types.GenerateContentConfig(response_mime_type="application/json")
                     try:
                         if video_file:
-                            response = client.models.generate_content(model='gemini-2.5-flash', contents=[video_file, prompt], config=generation_config)
+                            response = client.models.generate_content(model=options.get('translator_model', GLOBAL_GEMINI_MODEL), contents=[video_file, prompt], config=generation_config)
                         else:
-                            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=generation_config)
+                            response = client.models.generate_content(model=options.get('translator_model', GLOBAL_GEMINI_MODEL), contents=prompt, config=generation_config)
                     except Exception as e:
                         raise e
                     
@@ -1626,6 +1633,32 @@ UI_TEXT = {
     }
 }
 
+
+def fetch_api_models(provider: str, api_key: str) -> list:
+    if not api_key: return []
+    try:
+        import requests
+        if "Gemini" in provider:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            models = client.models.list()
+            return [m.name for m in models if "gemini" in m.name.lower()]
+        elif "OpenAI" in provider:
+            res = requests.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {api_key}"})
+            if res.status_code == 200:
+                return [m['id'] for m in res.json().get('data', []) if "whisper" in m['id'].lower() or "gpt" in m['id'].lower()]
+        elif "Groq" in provider:
+            res = requests.get("https://api.groq.com/openai/v1/models", headers={"Authorization": f"Bearer {api_key}"})
+            if res.status_code == 200:
+                return [m['id'] for m in res.json().get('data', [])]
+        elif "DeepSeek" in provider:
+            res = requests.get("https://api.deepseek.com/models", headers={"Authorization": f"Bearer {api_key}"})
+            if res.status_code == 200:
+                return [m['id'] for m in res.json().get('data', [])]
+    except Exception as e:
+        print(f"Error fetching models for {provider}: {e}")
+    return []
+
 class KhmerDubApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -1634,147 +1667,157 @@ class KhmerDubApp(ctk.CTk):
         self.title("BongbeeAI dub")
         import threading
         self.cancel_event = threading.Event()
-        self.geometry("700x650")
+        self.geometry("900x750")
         ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
+                # UI Layout
+        self.main_container = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.main_container.pack(fill="both", expand=True, padx=20, pady=20)
         
-        self.video_path = None
+        # Header Area
+        self.header_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.header_frame.pack(fill="x", pady=(0, 20))
         
-        try:
-            self.iconbitmap(get_bin_path('icon.ico'))
-        except: pass
+        self.lbl_title = ctk.CTkLabel(self.header_frame, text="BongbeeAI Dub", font=("Segoe UI", 32, "bold"), text_color="#0078D4")
+        self.lbl_title.pack(side="left")
         
-        try:
-            ctk.FontManager.load_font(get_bin_path('Battambang-Regular.ttf'))
-        except Exception as e:
-            debug_log(f"Failed to load Battambang font: {e}")
-            
-        # UI Layout
-        self.main_frame = ctk.CTkFrame(self)
-        self.main_frame.pack(pady=20, padx=20, fill="both", expand=True)
-        
-        self.ui_lang_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.ui_lang_frame.pack(fill="x", padx=10, pady=(0, 10))
+        self.ui_lang_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
+        self.ui_lang_frame.pack(side="right")
         self.lbl_ui_lang = ctk.CTkLabel(self.ui_lang_frame, text="UI Lang:", font=("Segoe UI", 12))
-        self.lbl_ui_lang.pack(side="right", padx=5)
+        self.lbl_ui_lang.pack(side="left", padx=5)
         self.ui_lang_var = ctk.StringVar(value="en")
         self.opt_ui_lang = ctk.CTkOptionMenu(self.ui_lang_frame, variable=self.ui_lang_var, values=["en", "km"], font=("Segoe UI", 12), width=60, command=self.update_ui_language)
-        self.opt_ui_lang.pack(side="right")
+        self.opt_ui_lang.pack(side="left")
         
-        self.lbl_title = ctk.CTkLabel(self.main_frame, text="BongbeeAI dub", font=("Segoe UI", 24, "bold"))
-        self.lbl_title.pack(pady=15)
+        # 1. Source Card
+        self.source_card = ctk.CTkFrame(self.main_container, corner_radius=15, fg_color="#2b2b2b")
+        self.source_card.pack(fill="x", pady=(0, 15))
+        self.lbl_source_title = ctk.CTkLabel(self.source_card, text="1. Media Source", font=("Segoe UI", 16, "bold"))
+        self.lbl_source_title.pack(anchor="w", padx=20, pady=(15, 5))
         
-        self.file_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.file_frame.pack(pady=10, fill="x")
+        self.file_frame = ctk.CTkFrame(self.source_card, fg_color="transparent")
+        self.file_frame.pack(fill="x", padx=20, pady=5)
+        self.btn_select = ctk.CTkButton(self.file_frame, text="Select Local Video", command=self.select_video, font=("Segoe UI", 14), width=180, fg_color="#343a40", hover_color="#495057")
+        self.btn_select.pack(side="left")
+        self.lbl_file = ctk.CTkLabel(self.file_frame, text="No video selected", font=("Segoe UI", 12), text_color="#ffffff")
+        self.lbl_file.pack(side="left", padx=15)
         
-        self.btn_select = ctk.CTkButton(self.file_frame, text="Select Local Video", command=self.select_video, font=("Segoe UI", 14), width=180)
-        self.btn_select.pack(side="left", padx=10)
+        self.url_frame = ctk.CTkFrame(self.source_card, fg_color="transparent")
+        self.url_frame.pack(fill="x", padx=20, pady=5)
+        self.url_entry = ctk.CTkEntry(self.url_frame, placeholder_text="Or paste video URL here (WeTV, YouTube, etc.)", font=("Segoe UI", 14), width=450)
+        self.url_entry.pack(side="left")
+        self.btn_download = ctk.CTkButton(self.url_frame, text="Download Video", command=self.start_download, font=("Segoe UI", 14), width=140, fg_color="#0078D4", hover_color="#106EBE")
+        self.btn_download.pack(side="left", padx=10)
         
-        self.lbl_file = ctk.CTkLabel(self.file_frame, text="No video selected", font=("Segoe UI", 12), text_color="gray")
-        self.lbl_file.pack(side="left", padx=10)
+        self.bgm_url_frame = ctk.CTkFrame(self.source_card, fg_color="transparent")
+        self.bgm_url_frame.pack(fill="x", padx=20, pady=(5, 15))
+        self.bgm_url_entry = ctk.CTkEntry(self.bgm_url_frame, placeholder_text="Optional: Background Music URL (Downloads with video)", font=("Segoe UI", 12), width=450)
+        self.bgm_url_entry.pack(side="left")
+        self.lbl_bgm_status = ctk.CTkLabel(self.bgm_url_frame, text="", font=("Segoe UI", 12), text_color="#ffffff")
+        self.lbl_bgm_status.pack(side="left", padx=10)
         
-        self.url_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.url_frame.pack(pady=5, fill="x")
+        # 2. Config Card
+        self.config_card = ctk.CTkFrame(self.main_container, corner_radius=15, fg_color="#2b2b2b")
+        self.config_card.pack(fill="x", pady=15)
+        self.lbl_config_title = ctk.CTkLabel(self.config_card, text="2. Pipeline Configuration", font=("Segoe UI", 16, "bold"))
+        self.lbl_config_title.pack(anchor="w", padx=20, pady=(15, 5))
         
-        self.url_entry = ctk.CTkEntry(self.url_frame, placeholder_text="Or paste video URL here (WeTV, YouTube, etc.)", font=("Segoe UI", 12), width=350)
-        self.url_entry.pack(side="left", padx=10)
-        
-        self.btn_download = ctk.CTkButton(self.url_frame, text="Download Video", command=self.start_download, font=("Segoe UI", 14), width=140, fg_color="#17a2b8", hover_color="#138496")
-        self.btn_download.pack(side="left", padx=5)
-        
-        self.bgm_url_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.bgm_url_frame.pack(pady=0, fill="x")
-        
-        self.bgm_url_entry = ctk.CTkEntry(self.bgm_url_frame, placeholder_text="Optional: Background Music URL (Downloads with video)", font=("Segoe UI", 12), width=350)
-        self.bgm_url_entry.pack(side="left", padx=10)
-        
-        self.lbl_bgm_status = ctk.CTkLabel(self.bgm_url_frame, text="", font=("Segoe UI", 12), text_color="gray")
-        self.lbl_bgm_status.pack(side="left", padx=5)
-        
-        self.lang_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.lang_frame.pack(pady=5, fill="x")
-        self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="1. Dub Into:", font=("Segoe UI", 14, "bold"))
-        self.lbl_lang.pack(side="left", padx=10)
+        self.lang_frame = ctk.CTkFrame(self.config_card, fg_color="transparent")
+        self.lang_frame.pack(fill="x", padx=20, pady=5)
+        self.lbl_lang = ctk.CTkLabel(self.lang_frame, text="Dub Into:", font=("Segoe UI", 14), width=140, anchor="e", text_color="#ffffff")
+        self.lbl_lang.pack(side="left", padx=(0, 15))
         self.lang_var = ctk.StringVar(value="Select Language...")
         self.opt_lang = ctk.CTkOptionMenu(self.lang_frame, variable=self.lang_var, values=["Select Language...", "Khmer", "English", "Chinese"], font=("Segoe UI", 14), command=self.update_ui_visibility)
-        self.opt_lang.pack(side="left", padx=5)
+        self.opt_lang.pack(side="left")
         
-        self.transcriber_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.lbl_transcriber = ctk.CTkLabel(self.transcriber_frame, text="2. Transcriber:", font=("Segoe UI", 14, "bold"))
-        self.lbl_transcriber.pack(side="left", padx=10)
+        self.transcriber_frame = ctk.CTkFrame(self.config_card, fg_color="transparent")
+        self.lbl_transcriber = ctk.CTkLabel(self.transcriber_frame, text="Transcriber:", font=("Segoe UI", 14), width=140, anchor="e", text_color="#ffffff")
+        self.lbl_transcriber.pack(side="left", padx=(0, 15))
         self.transcriber_var = ctk.StringVar(value="Select Transcriber...")
         self.opt_transcriber = ctk.CTkOptionMenu(self.transcriber_frame, variable=self.transcriber_var, values=["Select Transcriber...", "Whisper Local (Free)", "Gemini AI (Premium API)", "Groq Whisper (Premium API)", "OpenAI Whisper (Premium API)"], font=("Segoe UI", 14), width=250, command=self.update_ui_visibility)
-        self.opt_transcriber.pack(side="left", padx=5)
-        
-        self.lbl_speed = ctk.CTkLabel(self.transcriber_frame, text="Speed:", font=("Segoe UI", 14, "bold"))
+        self.opt_transcriber.pack(side="left")
+        self.lbl_speed = ctk.CTkLabel(self.transcriber_frame, text="Speed:", font=("Segoe UI", 14), text_color="#ffffff")
         self.speed_var = ctk.StringVar(value="Whisper Medium (Great, Mod)")
         self.opt_speed = ctk.CTkOptionMenu(self.transcriber_frame, variable=self.speed_var, values=["Whisper Medium (Great, Mod)", "Whisper Base (Okay, Fast)"], font=("Segoe UI", 14), width=180)
         
-        self.transcriber_api_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.lbl_transcriber_key = ctk.CTkLabel(self.transcriber_api_frame, text="API Key:", font=("Segoe UI", 14, "bold"))
-        self.lbl_transcriber_key.pack(side="left", padx=10)
+        self.transcriber_api_frame = ctk.CTkFrame(self.config_card, fg_color="transparent")
+        self.lbl_transcriber_key = ctk.CTkLabel(self.transcriber_api_frame, text="API Key:", font=("Segoe UI", 14), width=140, anchor="e", text_color="#ffffff")
+        self.lbl_transcriber_key.pack(side="left", padx=(0, 15))
         self.transcriber_key_var = ctk.StringVar(value="")
-        self.ent_transcriber_key = ctk.CTkEntry(self.transcriber_api_frame, textvariable=self.transcriber_key_var, placeholder_text="API Key...", show="*", width=250, font=("Segoe UI", 14))
-        self.ent_transcriber_key.pack(side="left", padx=5)
-        self.btn_get_groq_key = ctk.CTkButton(self.transcriber_api_frame, text="Get Free Groq Key", font=("Segoe UI", 12), width=120, fg_color="#f39c12", hover_color="#d68910", command=lambda: __import__('webbrowser').open('https://console.groq.com/keys'))
+        self.ent_transcriber_key = ctk.CTkEntry(self.transcriber_api_frame, textvariable=self.transcriber_key_var, placeholder_text="API Key...", show="*", width=200, font=("Segoe UI", 14))
+        self.ent_transcriber_key.pack(side="left")
+        self.btn_fetch_transcriber = ctk.CTkButton(self.transcriber_api_frame, text="🔄 Fetch", width=60, font=("Segoe UI", 12), command=self.fetch_transcriber_models)
+        self.btn_fetch_transcriber.pack(side="left", padx=5)
+        self.lbl_transcriber_model = ctk.CTkLabel(self.transcriber_api_frame, text="Model:", font=("Segoe UI", 14), text_color="#ffffff")
+        self.transcriber_model_var = ctk.StringVar(value="")
+        self.opt_transcriber_model = ctk.CTkOptionMenu(self.transcriber_api_frame, variable=self.transcriber_model_var, values=["Select model..."], font=("Segoe UI", 14), width=160)
+        self.lbl_transcriber_model.pack(side="left", padx=(10, 5))
+        self.opt_transcriber_model.pack(side="left")
+        self.btn_get_groq_key = ctk.CTkButton(self.transcriber_api_frame, text="Get Free Groq Key", font=("Segoe UI", 12), width=120, fg_color="#343a40", hover_color="#495057", command=lambda: __import__('webbrowser').open('https://console.groq.com/keys'))
         
-        self.trans_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.lbl_trans = ctk.CTkLabel(self.trans_frame, text="3. Translator:", font=("Segoe UI", 14, "bold"))
-        self.lbl_trans.pack(side="left", padx=10)
+        self.trans_frame = ctk.CTkFrame(self.config_card, fg_color="transparent")
+        self.lbl_trans = ctk.CTkLabel(self.trans_frame, text="Translator:", font=("Segoe UI", 14), width=140, anchor="e", text_color="#ffffff")
+        self.lbl_trans.pack(side="left", padx=(0, 15))
         self.trans_var = ctk.StringVar(value="Select Translator...")
         self.opt_trans = ctk.CTkOptionMenu(self.trans_frame, variable=self.trans_var, values=["Select Translator...", "Google Translate (Free)", "Gemini AI (Premium API)", "DeepSeek (Premium API)"], font=("Segoe UI", 14), width=230, command=self.update_ui_visibility)
-        self.opt_trans.pack(side="left", padx=5)
+        self.opt_trans.pack(side="left")
         
-        self.translator_api_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.lbl_translator_key = ctk.CTkLabel(self.translator_api_frame, text="API Key:", font=("Segoe UI", 14, "bold"))
-        self.lbl_translator_key.pack(side="left", padx=10)
+        self.translator_api_frame = ctk.CTkFrame(self.config_card, fg_color="transparent")
+        self.lbl_translator_key = ctk.CTkLabel(self.translator_api_frame, text="API Key:", font=("Segoe UI", 14), width=140, anchor="e", text_color="#ffffff")
+        self.lbl_translator_key.pack(side="left", padx=(0, 15))
         self.translator_key_var = ctk.StringVar(value="")
-        self.ent_translator_key = ctk.CTkEntry(self.translator_api_frame, textvariable=self.translator_key_var, placeholder_text="API Key...", show="*", width=250, font=("Segoe UI", 14))
-        self.ent_translator_key.pack(side="left", padx=5)
+        self.ent_translator_key = ctk.CTkEntry(self.translator_api_frame, textvariable=self.translator_key_var, placeholder_text="API Key...", show="*", width=200, font=("Segoe UI", 14))
+        self.ent_translator_key.pack(side="left")
+        self.btn_fetch_translator = ctk.CTkButton(self.translator_api_frame, text="🔄 Fetch", width=60, font=("Segoe UI", 12), command=self.fetch_translator_models)
+        self.btn_fetch_translator.pack(side="left", padx=5)
+        self.lbl_translator_model = ctk.CTkLabel(self.translator_api_frame, text="Model:", font=("Segoe UI", 14), text_color="#ffffff")
+        self.translator_model_var = ctk.StringVar(value="")
+        self.opt_translator_model = ctk.CTkOptionMenu(self.translator_api_frame, variable=self.translator_model_var, values=["Select model..."], font=("Segoe UI", 14), width=160)
+        self.lbl_translator_model.pack(side="left", padx=(10, 5))
+        self.opt_translator_model.pack(side="left")
         
-        self.engine_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.lbl_engine = ctk.CTkLabel(self.engine_frame, text="4. Voice Engine:", font=("Segoe UI", 14, "bold"))
-        self.lbl_engine.pack(side="left", padx=10)
+        self.engine_frame = ctk.CTkFrame(self.config_card, fg_color="transparent")
+        self.lbl_engine = ctk.CTkLabel(self.engine_frame, text="Voice Engine:", font=("Segoe UI", 14), width=140, anchor="e", text_color="#ffffff")
+        self.lbl_engine.pack(side="left", padx=(0, 15))
         self.engine_var = ctk.StringVar(value="Select Engine...")
         self.opt_engine = ctk.CTkOptionMenu(self.engine_frame, variable=self.engine_var, values=["Select Engine...", "Edge-TTS", "KiriTTS"], font=("Segoe UI", 14), command=self.update_ui_visibility)
-        self.opt_engine.pack(side="left", padx=5)
-        
-        self.lbl_voice_speed = ctk.CTkLabel(self.engine_frame, text="Speed:", font=("Segoe UI", 14, "bold"))
+        self.opt_engine.pack(side="left")
+        self.lbl_voice_speed = ctk.CTkLabel(self.engine_frame, text="Speed:", font=("Segoe UI", 14), text_color="#ffffff")
         self.voice_speed_var = ctk.StringVar(value="1.0x")
         self.opt_voice_speed = ctk.CTkOptionMenu(self.engine_frame, variable=self.voice_speed_var, values=["1.0x", "1.25x", "1.5x", "1.75x", "2.0x"], font=("Segoe UI", 14), width=80)
-        
-        self.lbl_key = ctk.CTkLabel(self.engine_frame, text="KiriTTS Key:", font=("Segoe UI", 14, "bold"))
+        self.lbl_key = ctk.CTkLabel(self.engine_frame, text="KiriTTS Key:", font=("Segoe UI", 14), text_color="#ffffff")
         self.api_key_var = ctk.StringVar(value="")
-        self.ent_key = ctk.CTkEntry(self.engine_frame, textvariable=self.api_key_var, placeholder_text="sk-...", show="*", width=150, font=("Segoe UI", 14))
+        self.ent_key = ctk.CTkEntry(self.engine_frame, textvariable=self.api_key_var, placeholder_text="sk-...", show="*", width=120, font=("Segoe UI", 14))
         self.api_key_var.trace_add("write", lambda *args: self.fetch_kiritts_voices() if self.engine_var.get() == "KiriTTS" else None)
-
-        # Profile name for saving / loading API keys
         self.profile_name_var = ctk.StringVar(value="default")
-        self.lbl_profile = ctk.CTkLabel(self.engine_frame, text="Profile:", font=("Segoe UI", 14, "bold"))
-        self.ent_profile = ctk.CTkEntry(self.engine_frame, textvariable=self.profile_name_var, placeholder_text="Profile name", width=120, font=("Segoe UI", 14))
-        self.btn_save_keys = ctk.CTkButton(self.engine_frame, text="💾 Save Keys", command=self.save_api_keys, font=("Segoe UI", 12), width=110, fg_color="#28a745", hover_color="#218838")
+        self.lbl_profile = ctk.CTkLabel(self.engine_frame, text="Profile:", font=("Segoe UI", 14), text_color="#ffffff")
+        self.ent_profile = ctk.CTkEntry(self.engine_frame, textvariable=self.profile_name_var, placeholder_text="Name", width=80, font=("Segoe UI", 14))
+        self.btn_save_keys = ctk.CTkButton(self.engine_frame, text="💾 Save", command=self.save_api_keys, font=("Segoe UI", 12), width=70, fg_color="#0078D4", hover_color="#106EBE")
 
-        self.voice_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.lbl_male = ctk.CTkLabel(self.voice_frame, text="Male Voice:", font=("Segoe UI", 14, "bold"))
-        self.lbl_male.pack(side="left", padx=10)
+        self.voice_frame = ctk.CTkFrame(self.config_card, fg_color="transparent")
+        self.lbl_male = ctk.CTkLabel(self.voice_frame, text="Male Voice:", font=("Segoe UI", 14), width=140, anchor="e", text_color="#ffffff")
+        self.lbl_male.pack(side="left", padx=(0, 15))
         self.voice_male_var = ctk.StringVar(value="Auto Detect")
         self.ent_male = ctk.CTkComboBox(self.voice_frame, variable=self.voice_male_var, width=160, font=("Segoe UI", 14), values=["Auto Detect"])
-        self.ent_male.pack(side="left", padx=5)
-        self.lbl_female = ctk.CTkLabel(self.voice_frame, text="Female Voice:", font=("Segoe UI", 14, "bold"))
+        self.ent_male.pack(side="left")
+        self.lbl_female = ctk.CTkLabel(self.voice_frame, text="Female Voice:", font=("Segoe UI", 14), text_color="#ffffff")
         self.lbl_female.pack(side="left", padx=(15, 5))
         self.voice_female_var = ctk.StringVar(value="Auto Detect")
         self.ent_female = ctk.CTkComboBox(self.voice_frame, variable=self.voice_female_var, width=160, font=("Segoe UI", 14), values=["Auto Detect"])
-        self.ent_female.pack(side="left", padx=5)
-        # Dub gender override
-        self.lbl_dub_gender = ctk.CTkLabel(self.voice_frame, text="Dub As:", font=("Segoe UI", 14, "bold"))
+        self.ent_female.pack(side="left")
+        self.lbl_dub_gender = ctk.CTkLabel(self.voice_frame, text="Dub As:", font=("Segoe UI", 14), text_color="#ffffff")
         self.lbl_dub_gender.pack(side="left", padx=(15, 5))
         self.dub_gender_var = ctk.StringVar(value="Auto Detect")
-        self.opt_dub_gender = ctk.CTkOptionMenu(self.voice_frame, variable=self.dub_gender_var,
-                                                values=["Auto Detect", "Male Only", "Female Only"],
-                                                font=("Segoe UI", 14), width=130)
-        self.opt_dub_gender.pack(side="left", padx=5)
+        self.opt_dub_gender = ctk.CTkOptionMenu(self.voice_frame, variable=self.dub_gender_var, values=["Auto Detect", "Male Only", "Female Only"], font=("Segoe UI", 14), width=130)
+        self.opt_dub_gender.pack(side="left")
         
-        self.chk_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        # 3. Options Card
+        self.options_card = ctk.CTkFrame(self.main_container, corner_radius=15, fg_color="#2b2b2b")
+        self.options_card.pack(fill="x", pady=15)
+        self.lbl_options_title = ctk.CTkLabel(self.options_card, text="3. Advanced Options", font=("Segoe UI", 16, "bold"))
+        self.lbl_options_title.pack(anchor="w", padx=20, pady=(15, 5))
+        
+        self.chk_frame = ctk.CTkFrame(self.options_card, fg_color="transparent")
+        self.chk_frame.pack(fill="x", padx=20, pady=5)
         self.chk_mirror_var = ctk.StringVar(value="off")
         self.chk_blur_var = ctk.StringVar(value="off")
         self.chk_emotion_var = ctk.StringVar(value="on")
@@ -1782,44 +1825,48 @@ class KhmerDubApp(ctk.CTk):
         self.chk_story_var = ctk.StringVar(value="off")
         self.chk_sync_var = ctk.StringVar(value="on")
         
-        self.chk_story = ctk.CTkCheckBox(self.chk_frame, text="Generate Recap", variable=self.chk_story_var, onvalue="on", offvalue="off", fg_color="#ffc107", hover_color="#e0a800")
-        self.chk_story.pack(side="left", padx=10)
+        self.chk_story = ctk.CTkCheckBox(self.chk_frame, text="Generate Recap", variable=self.chk_story_var, onvalue="on", offvalue="off")
+        self.chk_story.pack(side="left", padx=(0, 15))
         self.chk_vocals = ctk.CTkCheckBox(self.chk_frame, text="Remove Vocals", variable=self.chk_vocals_var, onvalue="on", offvalue="off")
-        self.chk_vocals.pack(side="left", padx=10)
+        self.chk_vocals.pack(side="left", padx=15)
         self.chk_sync = ctk.CTkCheckBox(self.chk_frame, text="Exact Lip Sync", variable=self.chk_sync_var, onvalue="on", offvalue="off")
-        self.chk_sync.pack(side="left", padx=10)
+        self.chk_sync.pack(side="left", padx=15)
         self.chk_mirror = ctk.CTkCheckBox(self.chk_frame, text="Mirror Video", variable=self.chk_mirror_var, onvalue="on", offvalue="off")
-        self.chk_mirror.pack(side="left", padx=10)
+        self.chk_mirror.pack(side="left", padx=15)
         self.chk_blur = ctk.CTkCheckBox(self.chk_frame, text="Hide Watermarks", variable=self.chk_blur_var, onvalue="on", offvalue="off")
-        self.chk_blur.pack(side="left", padx=10)
+        self.chk_blur.pack(side="left", padx=15)
 
-        self.custom_prompt_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.lbl_custom_prompt = ctk.CTkLabel(self.custom_prompt_frame, text="Custom AI Prompt:", font=("Segoe UI", 14, "bold"))
-        self.lbl_custom_prompt.pack(side="left", padx=10)
+        self.custom_prompt_frame = ctk.CTkFrame(self.options_card, fg_color="transparent")
+        self.custom_prompt_frame.pack(fill="x", padx=20, pady=(10, 15))
+        self.lbl_custom_prompt = ctk.CTkLabel(self.custom_prompt_frame, text="Custom AI Prompt:", font=("Segoe UI", 14), width=140, anchor="e", text_color="#ffffff")
+        self.lbl_custom_prompt.pack(side="left", padx=(0, 15))
         self.custom_prompt_var = ctk.StringVar(value="")
         self.ent_custom_prompt = ctk.CTkEntry(self.custom_prompt_frame, textvariable=self.custom_prompt_var, width=500, placeholder_text="Optional: Paste a custom style (e.g. 'Make it an interactive medical game...')", font=("Segoe UI", 12))
-        self.ent_custom_prompt.pack(side="left", padx=10)
+        self.ent_custom_prompt.pack(side="left")
 
+        # 4. Action Card
+        self.action_card = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.action_card.pack(fill="x", pady=20)
         
-        self.btn_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.btn_frame.pack(pady=25)
-        self.btn_start = ctk.CTkButton(self.btn_frame, text="Start Dubbing", command=self.start_dubbing, font=("Segoe UI", 18, "bold"), fg_color="#28a745", hover_color="#218838", height=45)
+        self.btn_frame = ctk.CTkFrame(self.action_card, fg_color="transparent")
+        self.btn_frame.pack(pady=10)
+        self.btn_start = ctk.CTkButton(self.btn_frame, text="Start Dubbing", command=self.start_dubbing, font=("Segoe UI", 18, "bold"), fg_color="#0078D4", hover_color="#106EBE", height=50, width=200, corner_radius=25)
         self.btn_start.pack(side="left", padx=10)
-        self.btn_stop = ctk.CTkButton(self.btn_frame, text="Stop Process", command=self.stop_dubbing, font=("Segoe UI", 18, "bold"), fg_color="#dc3545", hover_color="#c82333", height=45, state="disabled")
+        self.btn_stop = ctk.CTkButton(self.btn_frame, text="Stop Process", command=self.stop_dubbing, font=("Segoe UI", 18, "bold"), fg_color="#dc3545", hover_color="#c82333", height=50, width=200, corner_radius=25, state="disabled")
         self.btn_stop.pack(side="left", padx=10)
         
-        self.progress_bar = ctk.CTkProgressBar(self.main_frame, width=500, height=20)
+        self.progress_bar = ctk.CTkProgressBar(self.action_card, width=600, height=20, corner_radius=10, progress_color="#0078D4")
         self.progress_bar.pack(pady=10)
         self.progress_bar.set(0)
         
-        self.lbl_status = ctk.CTkLabel(self.main_frame, text="Ready", font=("Segoe UI", 14), text_color="#17a2b8")
+        self.lbl_status = ctk.CTkLabel(self.action_card, text="Ready", font=("Segoe UI", 14), text_color="#0078D4")
         self.lbl_status.pack(pady=10)
         
         # Initialize dynamic visibility
         self._load_api_keys()
         self.update_ui_visibility()
         self.update_ui_language()
-        
+
     def select_video(self):
         path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.mov *.avi *.mkv")])
         if path:
@@ -2090,19 +2137,19 @@ class KhmerDubApp(ctk.CTk):
         if "Select" not in lang and choice is not None:
             self.update_voice_defaults()
 
-        # Hide all cascade frames
+        # Hide all cascade frames inside the config card
         self.transcriber_frame.pack_forget()
         self.transcriber_api_frame.pack_forget()
         self.trans_frame.pack_forget()
         self.translator_api_frame.pack_forget()
         self.engine_frame.pack_forget()
         self.voice_frame.pack_forget()
-        self.chk_frame.pack_forget()
-        self.btn_start.pack_forget()
+        
+        # Options and Checkboxes are now always visible in their own card!
         
         # Step 1: Language -> Transcriber
         if "Select" not in lang:
-            self.transcriber_frame.pack(pady=5, fill="x")
+            self.transcriber_frame.pack(fill="x", padx=20, pady=5)
             
             # Step 2: Transcriber -> Transcriber API + Translator
             if "Select" not in transcriber:
@@ -2112,7 +2159,7 @@ class KhmerDubApp(ctk.CTk):
                 else:
                     self.lbl_speed.pack_forget()
                     self.opt_speed.pack_forget()
-                    self.transcriber_api_frame.pack(pady=5, fill="x")
+                    self.transcriber_api_frame.pack(fill="x", padx=20, pady=5)
                     if "Groq" in transcriber:
                         self.lbl_transcriber_key.configure(text="Groq API Key:")
                         self.ent_transcriber_key.configure(placeholder_text="gsk_...")
@@ -2126,12 +2173,12 @@ class KhmerDubApp(ctk.CTk):
                         self.ent_transcriber_key.configure(placeholder_text="AIzaSy...")
                         self.btn_get_groq_key.pack_forget()
                     
-                self.trans_frame.pack(pady=5, fill="x")
+                self.trans_frame.pack(fill="x", padx=20, pady=5)
                 
                 # Step 3: Translator -> Translator API + Engine
                 if "Select" not in translator:
                     if "Premium" in translator:
-                        self.translator_api_frame.pack(pady=5, fill="x")
+                        self.translator_api_frame.pack(fill="x", padx=20, pady=5)
                         if "DeepSeek" in translator:
                             self.lbl_translator_key.configure(text="DeepSeek API Key:")
                             self.ent_translator_key.configure(placeholder_text="sk-...")
@@ -2139,7 +2186,7 @@ class KhmerDubApp(ctk.CTk):
                             self.lbl_translator_key.configure(text="Gemini API Key:")
                             self.ent_translator_key.configure(placeholder_text="AIzaSy...")
                             
-                    self.engine_frame.pack(pady=5, fill="x")
+                    self.engine_frame.pack(fill="x", padx=20, pady=5)
                     
                     # Step 4: Engine -> Start
                     if "Select" not in engine:
@@ -2147,31 +2194,52 @@ class KhmerDubApp(ctk.CTk):
                         self.opt_voice_speed.pack(side="left", padx=5)
                         if engine == "KiriTTS":
                             self.opt_voice_speed.configure(state="normal")
-                        else:
-                            self.opt_voice_speed.configure(state="normal")
-                        if engine == "KiriTTS":
                             self.lbl_key.pack(side="left", padx=(20, 10))
                             self.ent_key.pack(side="left", padx=5)
                             self.lbl_profile.pack(side="left", padx=(15, 5))
                             self.ent_profile.pack(side="left", padx=5)
                             self.btn_save_keys.pack(side="left", padx=5)
-                            self.voice_frame.pack(pady=5, fill="x")
+                            self.voice_frame.pack(fill="x", padx=20, pady=(5, 15))
                         else:
+                            self.opt_voice_speed.configure(state="normal")
                             self.lbl_key.pack_forget()
                             self.ent_key.pack_forget()
                             self.lbl_profile.pack_forget()
                             self.ent_profile.pack_forget()
                             self.btn_save_keys.pack_forget()
                             self.voice_frame.pack_forget()
-                            
-                        self.chk_frame.pack(pady=15, fill="x")
-                        self.custom_prompt_frame.pack(pady=5, fill="x")
-                        self.btn_start.pack(pady=25)
-                        
-        self.progress_bar.pack_forget()
-        self.lbl_status.pack_forget()
-        self.progress_bar.pack(pady=10)
-        self.lbl_status.pack(pady=10)
+
+    def fetch_transcriber_models(self):
+        self.btn_fetch_transcriber.configure(text="...", state="disabled")
+        def run():
+            models = fetch_api_models(self.transcriber_var.get(), self.ent_transcriber_key.get().strip())
+            self.after(0, self.update_transcriber_models_ui, models)
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+        
+    def update_transcriber_models_ui(self, models):
+        self.btn_fetch_transcriber.configure(text="🔄 Fetch", state="normal")
+        if models:
+            self.opt_transcriber_model.configure(values=models)
+            self.transcriber_model_var.set(models[0])
+        else:
+            self.transcriber_model_var.set("Failed to fetch")
+
+    def fetch_translator_models(self):
+        self.btn_fetch_translator.configure(text="...", state="disabled")
+        def run():
+            models = fetch_api_models(self.trans_var.get(), self.ent_translator_key.get().strip())
+            self.after(0, self.update_translator_models_ui, models)
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+        
+    def update_translator_models_ui(self, models):
+        self.btn_fetch_translator.configure(text="🔄 Fetch", state="normal")
+        if models:
+            self.opt_translator_model.configure(values=models)
+            self.translator_model_var.set(models[0])
+        else:
+            self.translator_model_var.set("Failed to fetch")
 
     def update_voice_defaults(self, choice=None):
         engine = self.engine_var.get()
@@ -2251,7 +2319,12 @@ class KhmerDubApp(ctk.CTk):
         self.progress_bar.set(0)
         self.lbl_status.configure(text="⚙️ Initializing AI components...")
         job_id = str(uuid.uuid4())[:8]
+        
+        global GLOBAL_GEMINI_MODEL
+        GLOBAL_GEMINI_MODEL = self.translator_model_var.get() # Legacy fallback if needed
         options = {
+            'transcriber_model': self.transcriber_model_var.get(),
+            'translator_model': self.translator_model_var.get(),
             'mirror': self.chk_mirror_var.get() == "on",
             'blur': self.chk_blur_var.get() == "on",
             'smart_emotion': self.chk_emotion_var.get() == "on",
