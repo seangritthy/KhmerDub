@@ -1664,7 +1664,7 @@ class KhmerDubApp(ctk.CTk):
         super().__init__()
         global app_gui
         app_gui = self  
-        self.title("BongbeeAI dub")
+        self.title("BongbeeAI Dub v1.7.0")
         import threading
         self.cancel_event = threading.Event()
         self.geometry("900x750")
@@ -1677,7 +1677,7 @@ class KhmerDubApp(ctk.CTk):
         self.header_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.header_frame.pack(fill="x", pady=(0, 20))
         
-        self.lbl_title = ctk.CTkLabel(self.header_frame, text="BongbeeAI Dub", font=("Segoe UI", 32, "bold"), text_color="#0078D4")
+        self.lbl_title = ctk.CTkLabel(self.header_frame, text="BongbeeAI Dub v1.7.0", font=("Segoe UI", 32, "bold"), text_color="#0078D4")
         self.lbl_title.pack(side="left")
         
         self.ui_lang_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")

@@ -172,7 +172,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # ── Step 7: Verify output ─────────────────────────────────────
 Banner "Step 7 — Verifying output"
-$DistExe = Join-Path $ProjectDir "dist\KhmerDub\KhmerDub.exe"
+$DistExe = Join-Path $ProjectDir "dist\KhmerDub.exe"
 if (-not (Test-Path $DistExe)) {
     ERR "Build seems to have failed — KhmerDub.exe not found in dist\"
 }
@@ -184,21 +184,21 @@ OK "KhmerDub.exe built successfully! ($SizeMB MB)"
 Banner "🎉 BUILD COMPLETE!"
 Write-Host ""
 Write-Host "  Output folder: " -NoNewline
-Write-Host (Join-Path $ProjectDir "dist\KhmerDub\") -ForegroundColor Cyan
+Write-Host (Join-Path $ProjectDir "dist\KhmerDub.exe") -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  To run the app:" -ForegroundColor White
-Write-Host "  .\dist\KhmerDub\KhmerDub.exe" -ForegroundColor Green
+Write-Host "  .\dist\KhmerDub.exe" -ForegroundColor Green
 Write-Host ""
 # ── Step 8: Create ZIP archive ────────────────────────────────
 Banner 'Step 8 — Creating ZIP archive for GitHub Release'
-$ZipTarget = Join-Path $ProjectDir 'KhmerDub-windows-standalone.zip'
+$ZipTarget = Join-Path $ProjectDir 'KhmerDub-v1.7.0-windows-standalone.zip'
 if (Test-Path $ZipTarget) { Remove-Item $ZipTarget -Force }
-Compress-Archive -Path (Join-Path $ProjectDir 'dist\KhmerDub\*') -DestinationPath $ZipTarget
+Compress-Archive -Path (Join-Path $ProjectDir 'dist\KhmerDub.exe') -DestinationPath $ZipTarget
 $ZipSizeMB = [math]::Round((Get-Item $ZipTarget).Length / 1MB, 1)
-OK ('Zip created: KhmerDub-windows-standalone.zip (' + $ZipSizeMB + ' MB)')
+OK ('Zip created: KhmerDub-v1.7.0-windows-standalone.zip (' + $ZipSizeMB + ' MB)')
 
 Write-Host ''
-Write-Host '  To share: upload the KhmerDub-windows-standalone.zip file to GitHub Releases.' -ForegroundColor White
+Write-Host '  To share: upload the KhmerDub-v1.7.0-windows-standalone.zip file to GitHub Releases.' -ForegroundColor White
 Write-Host ''
 
 # Ask user if they want to launch now
