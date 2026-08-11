@@ -15,6 +15,9 @@ uploads/
 *.wav
 *.srt
 *.exe
+*.apk
+*.idsig
+debug.keystore
 
 # Environments
 venv/

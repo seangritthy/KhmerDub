@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>KhmerDub - Khmer Video & Dubbing Downloader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Top App Bar -->
+  <header class="app-header">
+    <div class="brand">
+      <div class="logo-badge">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>KhmerDub 🇰🇭🎬</h1>
+        <span class="subtext">Khmer Video & Movie Downloader</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="paste-btn" class="header-btn" title="Paste from Clipboard">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+          <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+        </svg>
+        <span>Paste</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="main-content">
+
+    <!-- TAB 1: DOWNLOADER -->
+    <section id="tab-downloader" class="tab-pane active">
+      
+      <!-- Input Card -->
+      <div class="input-card">
+        <div class="input-wrapper">
+          <svg class="search-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+          </svg>
+          <input type="text" id="url-input" placeholder="Paste YouTube, Facebook or any video URL..." autocomplete="off">
+          <button id="clear-url-btn" class="clear-btn" style="display:none;">&times;</button>
+        </div>
+        <button id="analyze-btn" class="primary-btn">
+          <span>Fetch Video</span>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+            <polyline points="12 5 19 12 12 19"></polyline>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Quick Platform Shortcuts -->
+      <div class="section-title">Supported Platforms</div>
+      <div class="platform-grid">
+        <button class="platform-card yt" data-url="https://youtube.com">
+          <div class="p-icon">▶</div>
+          <span>YouTube</span>
+        </button>
+        <button class="platform-card fb" data-url="https://facebook.com">
+          <div class="p-icon">f</div>
+          <span>Facebook</span>
+        </button>
+        <button class="platform-card tt" data-url="https://tiktok.com">
+          <div class="p-icon">🎵</div>
+          <span>TikTok</span>
+        </button>
+        <button class="platform-card ig" data-url="https://instagram.com">
+          <div class="p-icon">📸</div>
+          <span>Instagram</span>
+        </button>
+        <button class="platform-card tw" data-url="https://x.com">
+          <div class="p-icon">𝕏</div>
+          <span>Twitter / X</span>
+        </button>
+        <button class="platform-card vm" data-url="https://vimeo.com">
+          <div class="p-icon">v</div>
+          <span>Vimeo</span>
+        </button>
+      </div>
+
+      <!-- Video Analysis Result Modal/Card -->
+      <div id="video-result" class="result-card" style="display:none;">
+        <div class="result-header">
+          <img id="res-thumb" src="" alt="Thumbnail" class="thumb-img">
+          <div class="result-info">
+            <span id="res-platform" class="badge">YouTube</span>
+            <h3 id="res-title">Video Title</h3>
+            <p id="res-url" class="res-url-text">https://...</p>
+          </div>
+        </div>
+
+        <div class="format-section">
+          <h4>Select Format & Quality:</h4>
+          <div id="format-options" class="format-list">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+
+        <button id="start-dl-btn" class="download-now-btn">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          <span>Download Selected Video</span>
+        </button>
+      </div>
+
+      <!-- Active Downloads List -->
+      <div class="section-title">Active Downloads</div>
+      <div id="active-downloads" class="active-dl-list">
+        <div class="empty-state" id="empty-active-dl">
+          <p>No active downloads right now.</p>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- TAB 2: WEB SNIFFER BROWSER -->
+    <section id="tab-browser" class="tab-pane">
+      <div class="browser-bar">
+        <button id="browser-back" class="nav-btn">&larr;</button>
+        <button id="browser-forward" class="nav-btn">&rarr;</button>
+        <input type="text" id="browser-url-input" placeholder="Search or type web address...">
+        <button id="browser-go-btn" class="go-btn">Go</button>
+      </div>
+
+      <div class="sniffer-notification" id="sniffer-badge" style="display:none;">
+        <div class="sniff-info">
+          <span class="sniff-icon">🎬</span>
+          <span>Video Media Detected!</span>
+        </div>
+        <button id="sniff-dl-btn" class="sniff-btn">Download</button>
+      </div>
+
+      <div class="browser-frame-container">
+        <div class="browser-placeholder">
+          <div class="b-icon">🌐</div>
+          <h3>Web Media Sniffer</h3>
+          <p>Navigate to any video website (Facebook, Twitter, TikTok, etc.) to automatically detect and extract media streams.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: DOWNLOADED FILES -->
+    <section id="tab-files" class="tab-pane">
+      <div class="files-header">
+        <input type="text" id="files-search" placeholder="Search saved files...">
+        <button id="refresh-files-btn" class="refresh-btn">🔄</button>
+      </div>
+      <div id="downloads-list" class="files-list">
+        <div class="empty-state">
+          <p>No downloaded files found.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: SETTINGS -->
+    <section id="tab-settings" class="tab-pane">
+      <div class="settings-card">
+        <h3>Settings & Preferences</h3>
+        
+        <div class="setting-item">
+          <div class="s-info">
+            <span class="s-title">Download Storage Directory</span>
+            <span class="s-desc">/sdcard/Download/YTD/</span>
+          </div>
+          <span class="s-tag">Default</span>
+        </div>
+
+        <div class="setting-item">
+          <div class="s-info">
+            <span class="s-title">Auto-Paste Clipboard</span>
+            <span class="s-desc">Automatically check clipboard for video links on launch</span>
+          </div>
+          <input type="checkbox" id="setting-auto-paste" checked>
+        </div>
+
+        <div class="setting-item">
+          <div class="s-info">
+            <span class="s-title">High Quality Audio Extraction</span>
+            <span class="s-desc">Convert YouTube & video streams to MP3 (320kbps)</span>
+          </div>
+          <input type="checkbox" id="setting-hq-audio" checked>
+        </div>
+
+        <div class="setting-item">
+          <div class="s-info">
+            <span class="s-title">App Version</span>
+            <span id="app-version-text" class="s-desc">v1.0.3 Pro Edition</span>
+          </div>
+          <button id="check-update-btn" class="header-btn">Check Update</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Bottom Navigation Bar -->
+  <nav class="bottom-nav">
+    <button class="nav-item active" data-tab="tab-downloader">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="7 10 12 15 17 10"></polyline>
+        <line x1="12" y1="15" x2="12" y2="3"></line>
+      </svg>
+      <span>Downloader</span>
+    </button>
+    <button class="nav-item" data-tab="tab-browser">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="2" y1="12" x2="22" y2="12"></line>
+        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+      </svg>
+      <span>Browser</span>
+    </button>
+    <button class="nav-item" data-tab="tab-files">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+      </svg>
+      <span>Files</span>
+    </button>
+    <button class="nav-item" data-tab="tab-settings">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+      </svg>
+      <span>Settings</span>
+    </button>
+  </nav>
+
+  <!-- In-App Video & Audio Player Modal -->
+  <div id="player-modal" class="player-modal" style="display:none;">
+    <div class="player-content">
+      <div class="player-header">
+        <h4 id="player-title">Playing File</h4>
+        <div class="player-header-actions">
+          <button id="external-play-btn" class="ext-btn">External App</button>
+          <button id="close-player-btn" class="close-player-btn">&times;</button>
+        </div>
+      </div>
+      <div class="media-container">
+        <video id="inapp-video" controls autoplay style="display:none; width:100%; max-height:65vh; border-radius:12px;"></video>
+        <audio id="inapp-audio" controls autoplay style="display:none; width:100%; margin-top:20px;"></audio>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
