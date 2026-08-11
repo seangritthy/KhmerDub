@@ -1,46 +1,77 @@
-# KhmerDub 🇰🇭🎬
+# KhmerDub APK 🇰🇭🎬
 
-**KhmerDub** is an automated, AI-powered video localization tool that seamlessly dubs English (or any language) videos into natural-sounding Khmer (Cambodian). It automatically extracts audio, transcribes it, translates it to Khmer, generates perfectly lip-synced Khmer text-to-speech, and burns subtitles using the beautiful native Battambang font.
+**KhmerDub APK** is an automated, AI-powered video localization tool and mobile application that seamlessly dubs English (or foreign language) videos into natural-sounding Khmer (Cambodian). It automatically extracts audio, transcribes it, translates it to Khmer, generates natural Khmer text-to-speech, and burns soft/hard subtitles using the native `Battambang-Regular.ttf` font.
 
-Built completely in Python with a standalone CustomTkinter Native Windows GUI.
+This repository contains both the **Native Desktop Application (Python / CustomTkinter)** and the **Native Android Webview APK Application** built directly for Termux & Android devices.
 
-## Features
-- **Smart Voice Detection:** Automatically scans the audio to determine the speaker's gender and maps it to appropriate Khmer voices (e.g., Sreymom, Piseth).
-- **Radio DJ Auto-Ducking:** Dynamically lowers the original video volume by 15dB precisely when the Khmer dubbed voice is speaking, maintaining background music and sound effects natively.
-- **Auto-Sync:** Adjusts the tempo of the generated Khmer speech to perfectly fit within the original speaker's time window.
-- **Cinematic Subtitles:** Automatically generates and burns `.srt` subtitles using the native `Battambang` font, designed specifically for mobile and desktop screens.
-- **Mirroring & Watermark Removal:** Avoid copyright strikes and clean up videos by dynamically mirroring the video or applying cinematic black bars.
+---
 
-## Tech Stack
-- **Whisper AI**: Speech-to-Text Transcription (Fast model)
-- **Deep Translator**: Robust translation to Khmer with exponential backoff handling for API limits
-- **Edge TTS**: High-quality Khmer text-to-speech engine
-- **Pydub & Librosa**: Audio processing, gender detection, and tempo adjustment
-- **CustomTkinter**: Native Windows GUI interface
-- **FFmpeg**: Video, Audio, and Subtitle processing
+## 🌟 Key Features
 
-## Installation
-If you are running the compiled Native App (`KhmerDub.exe`), no installation is necessary! Simply run the executable.
+- **Smart Voice Detection:** Scans audio to identify speaker gender and maps it to natural Khmer TTS voices (`km-KH-PisethNeural`, `km-KH-SreymomNeural`).
+- **Audio Ducking:** Dynamically lowers background audio by ~15dB during Khmer speech to preserve background music and SFX.
+- **Auto Sync & Tempo Adjustment:** Synchronizes Khmer speech tempo to match original time windows.
+- **Khmer Subtitle Rendering:** Burns crisp Khmer subtitles using the native `Battambang-Regular.ttf` font.
+- **Mobile Android Webview Interface:** Fast, lightweight, and modern UI engineered for phones and tablets.
+- **Termux Command-Line APK Compiler:** Build signed release APKs directly on your Termux Android device without Android Studio!
 
-### To Run from Source:
-1. Ensure you have Python 3.11+ installed.
-2. Clone this repository.
-3. Install the dependencies:
+---
+
+## 🛠️ Tech Stack
+
+- **Android Webview / Native Java**: Mobile app wrapper with local asset server
+- **Whisper AI**: Fast speech-to-text transcription
+- **Deep Translator**: Robust translation to Khmer with rate-limiting handling
+- **Edge TTS**: High-fidelity Khmer text-to-speech engine
+- **Pydub & Librosa**: Audio processing and gender classification
+- **FFmpeg**: Video/audio encoding and subtitle burning
+- **AAPT & d8 / apksigner**: Native Termux Android compilation stack
+
+---
+
+## 📱 Building the Android APK on Termux
+
+You can compile the Android APK directly on Termux without needing a PC or Android Studio.
+
+### Prerequisites:
+Make sure standard Termux build tools are installed (`aapt`, `ecj` or `openjdk`, `d8`, `apksigner`, `zipalign`).
+
+### Build Command:
+Run the build script:
+```bash
+./build_apk.sh
+```
+
+This will automatically:
+1. Fetch `android.jar` platform definitions.
+2. Package Android resources via `aapt`.
+3. Compile Java source code in `src/`.
+4. Convert bytecode to `classes.dex` using `d8`.
+5. Package, zip-align, and sign `khmerdubapk.apk` using `apksigner`.
+
+Output path: `khmerdubapk.apk` (and `khmerdubapk-v1.0.1.apk`)
+
+---
+
+## 📦 Releases & Versioning
+
+All development, builds, and official release packages are managed and published directly within this repository (`khmerdubapk`). Releases are not published to external APK repositories.
+
+---
+
+## 🖥️ Running the PC Desktop App
+
+1. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-4. Download the [FFmpeg](https://ffmpeg.org/) binaries and place `ffmpeg.exe` and `ffprobe.exe` inside an `ffmpeg_bin/` directory in the project root.
-5. Run the app:
+2. Download `ffmpeg` binaries to `ffmpeg_bin/`.
+3. Launch the desktop GUI:
    ```bash
    python app.py
    ```
 
-## Compiling
-To compile KhmerDub into a single standalone `.exe` using PyInstaller:
-```bash
-pyinstaller KhmerDub.spec --clean
-```
-The resulting executable will be placed in the `dist/` directory.
+---
 
-## License
-MIT License
+## 📜 License
+MIT License - Open source for community video localization in Cambodia 🇰🇭.

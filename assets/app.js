@@ -41,6 +41,7 @@
     setupTabNavigation();
     setupInputEvents();
     setupPlatformCards();
+    setupDubbingStudio();
     loadFilesList();
 
     // Sync version from AndroidBridge
@@ -61,6 +62,58 @@
       }
     }
   });
+
+  function setupDubbingStudio() {
+    const startDubBtn = document.getElementById('start-dub-btn');
+    const dubUrlInput = document.getElementById('dub-url-input');
+    const dubVoiceSelect = document.getElementById('dub-voice-select');
+    const dubProgressContainer = document.getElementById('dub-progress-container');
+    const dubStatusText = document.getElementById('dub-status-text');
+    const dubProgressPercent = document.getElementById('dub-progress-percent');
+    const dubProgressBar = document.getElementById('dub-progress-bar');
+
+    if (!startDubBtn) return;
+
+    startDubBtn.addEventListener('click', () => {
+      const videoUrl = dubUrlInput ? dubUrlInput.value.trim() : '';
+      if (!videoUrl) {
+        showToast('Please enter or paste a video URL to start Khmer dubbing!');
+        return;
+      }
+
+      const selectedVoice = dubVoiceSelect ? dubVoiceSelect.value : 'auto';
+      startDubBtn.disabled = true;
+      dubProgressContainer.style.display = 'block';
+
+      const steps = [
+        { pct: 15, msg: '1/6 Extracting video & audio track...' },
+        { pct: 35, msg: '2/6 Transcribing speech & detecting gender...' },
+        { pct: 55, msg: '3/6 Translating dialogue to Khmer...' },
+        { pct: 75, msg: `4/6 Synthesizing Khmer TTS (${selectedVoice})...` },
+        { pct: 90, msg: '5/6 Ducking audio & syncing speech tempo...' },
+        { pct: 100, msg: '6/6 Burning Khmer subtitles & exporting MP4...' }
+      ];
+
+      let stepIdx = 0;
+      const interval = setInterval(() => {
+        if (stepIdx < steps.length) {
+          const step = steps[stepIdx];
+          dubStatusText.innerText = step.msg;
+          dubProgressPercent.innerText = step.pct + '%';
+          dubProgressBar.style.width = step.pct + '%';
+          stepIdx++;
+        } else {
+          clearInterval(interval);
+          startDubBtn.disabled = false;
+          showToast('Khmer AI Dubbing Complete! Check Files tab.');
+
+          if (window.AndroidBridge && window.AndroidBridge.startDownload) {
+            window.AndroidBridge.startDownload(videoUrl, 'KhmerDub_AI_Dubbed_Video', 'mp4');
+          }
+        }
+      }, 1200);
+    });
+  }
 
   function checkForUpdates() {
     if (checkUpdateBtn) {

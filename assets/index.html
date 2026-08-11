@@ -129,7 +129,76 @@
 
     </section>
 
-    <!-- TAB 2: WEB SNIFFER BROWSER -->
+    <!-- TAB 2: KHMER AI DUBBING STUDIO -->
+    <section id="tab-dubbing" class="tab-pane">
+      <div class="input-card">
+        <div class="card-header">
+          <div class="card-icon">🎙️</div>
+          <div>
+            <h3>Khmer AI Dubbing Studio</h3>
+            <p class="subtext">Dub English & Foreign Videos into Natural Khmer Speech</p>
+          </div>
+        </div>
+
+        <div class="input-wrapper" style="margin-top:15px;">
+          <svg class="search-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+          </svg>
+          <input type="text" id="dub-url-input" placeholder="Paste YouTube / Video URL to Dub..." autocomplete="off">
+        </div>
+
+        <div class="dub-options-grid" style="margin-top:15px; display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+          <div class="option-group">
+            <label style="font-size:12px; font-weight:600; color:#888; display:block; margin-bottom:5px;">Khmer Voice 🗣️</label>
+            <select id="dub-voice-select" style="width:100%; padding:10px; border-radius:10px; background:#1e1e2d; color:#fff; border:1px solid #333;">
+              <option value="auto" selected>🤖 Auto Gender Detect</option>
+              <option value="km-KH-PisethNeural">👨 Piseth (Male Voice)</option>
+              <option value="km-KH-SreymomNeural">👩 Sreymom (Female Voice)</option>
+            </select>
+          </div>
+          <div class="option-group">
+            <label style="font-size:12px; font-weight:600; color:#888; display:block; margin-bottom:5px;">Dubbing Mode 🎬</label>
+            <select id="dub-mode-select" style="width:100%; padding:10px; border-radius:10px; background:#1e1e2d; color:#fff; border:1px solid #333;">
+              <option value="full" selected>Full Dub + Subtitles</option>
+              <option value="dub_only">Khmer Dubbed Audio Only</option>
+              <option value="sub_only">Khmer Subtitles Only</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="toggle-group" style="margin-top:15px; display:flex; flex-direction:column; gap:10px;">
+          <label style="display:flex; align-items:center; justify-content:space-between; font-size:13px; color:#ddd;">
+            <span>📻 Auto-Ducking Original Audio (-15dB)</span>
+            <input type="checkbox" id="dub-ducking-check" checked>
+          </label>
+          <label style="display:flex; align-items:center; justify-content:space-between; font-size:13px; color:#ddd;">
+            <span>⏱️ Auto Sync Speech Tempo</span>
+            <input type="checkbox" id="dub-sync-check" checked>
+          </label>
+          <label style="display:flex; align-items:center; justify-content:space-between; font-size:13px; color:#ddd;">
+            <span>📝 Burn Battambang Khmer Subtitles</span>
+            <input type="checkbox" id="dub-sub-check" checked>
+          </label>
+        </div>
+
+        <button id="start-dub-btn" class="primary-btn" style="margin-top:20px; width:100%; background:linear-gradient(135deg, #e91e63, #9c27b0);">
+          <span>🚀 Start Khmer AI Dubbing</span>
+        </button>
+
+        <div id="dub-progress-container" style="display:none; margin-top:20px; background:#181824; padding:15px; border-radius:12px;">
+          <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:8px;">
+            <span id="dub-status-text">Processing Dubbing...</span>
+            <span id="dub-progress-percent">0%</span>
+          </div>
+          <div style="width:100%; height:8px; background:#2a2a3c; border-radius:4px; overflow:hidden;">
+            <div id="dub-progress-bar" style="width:0%; height:100%; background:linear-gradient(90deg, #e91e63, #00bcd4); transition:width 0.3s;"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: WEB SNIFFER BROWSER -->
     <section id="tab-browser" class="tab-pane">
       <div class="browser-bar">
         <button id="browser-back" class="nav-btn">&larr;</button>
@@ -218,6 +287,14 @@
         <line x1="12" y1="15" x2="12" y2="3"></line>
       </svg>
       <span>Downloader</span>
+    </button>
+    <button class="nav-item" data-tab="tab-dubbing">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+        <line x1="12" y1="19" x2="12" y2="22"></line>
+      </svg>
+      <span>AI Dubbing</span>
     </button>
     <button class="nav-item" data-tab="tab-browser">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
