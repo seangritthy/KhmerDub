@@ -1,5 +1,10 @@
 # KhmerDub - Release Notes
 
+## Version 1.0.3 (Clean Production Release)
+- **Clean Repository Release**: Removed all obsolete legacy APK artifacts from release directory.
+- **Khmer AI Dubbing Engine Optimization**: Faster voice synthesis routing and smoother ducking transition (-15dB).
+- **Webview Asset Server Enhancement**: Direct internal stream interceptor and native file provider integration.
+
 ## Version 1.0.2 (Pro Dubbing & Fast Stream Engine)
 - **Khmer AI Dubbing Studio Pro**: Enhanced speech tempo controls (0.8x–1.5x pitch/speed alignment) and voice preset switching (`Piseth` & `Sreymom`).
 - **High-Definition Stream Engine**: Multi-quality downloader supporting 1080p Full HD, 720p HD, 480p SD, and 320kbps MP3 audio extraction.
