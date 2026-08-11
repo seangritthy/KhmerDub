@@ -1,5 +1,11 @@
 # KhmerDub - Release Notes
 
+## Version 1.0.2 (Pro Dubbing & Fast Stream Engine)
+- **Khmer AI Dubbing Studio Pro**: Enhanced speech tempo controls (0.8x–1.5x pitch/speed alignment) and voice preset switching (`Piseth` & `Sreymom`).
+- **High-Definition Stream Engine**: Multi-quality downloader supporting 1080p Full HD, 720p HD, 480p SD, and 320kbps MP3 audio extraction.
+- **Improved Offline File Manager**: File search, instant local player preview, and native external app launcher.
+- **Direct Repository Build**: Production release generated directly inside active project directory `khmerdubapk`.
+
 ## Version 1.0.1 (AI Dubbing Studio Release)
 - **Khmer AI Dubbing Studio**: Dedicated AI video dubbing studio tab with support for male (`km-KH-PisethNeural`) and female (`km-KH-SreymomNeural`) Khmer speech synthesis.
 - **Audio Ducking & Tempo Sync**: Auto-ducking original video track (-15dB) with automated Khmer speech tempo fitting.
